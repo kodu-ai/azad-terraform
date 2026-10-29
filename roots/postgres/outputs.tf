@@ -1,9 +1,3 @@
-output "database_url" {
-  description = "Sensitive direct connection string for the existing installer."
-  sensitive   = true
-  value       = module.base.database_url
-}
-
 output "cloudflare_resources" {
   description = "Fixed resources owned by Terraform."
   value       = module.base.cloudflare_resources

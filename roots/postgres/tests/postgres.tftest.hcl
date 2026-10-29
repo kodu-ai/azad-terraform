@@ -17,12 +17,8 @@ variables {
     revision = "0000000000000000000000000000000000000000"
   }
 }
-run "direct_tls_connection_and_current_storage" {
+run "current_storage" {
   command = plan
-  assert {
-    condition     = output.database_url == "postgresql://azad:a%40b%20c%2B%2F@ep-test.eu-central-1.aws.neon.tech:5432/azad?sslmode=verify-full"
-    error_message = "Use the direct endpoint with verified TLS and encoded credentials."
-  }
   assert {
     condition     = length(output.cloudflare_resources.buckets) == 2 && contains(keys(output.cloudflare_resources.buckets), "files") && contains(keys(output.cloudflare_resources.buckets), "agent_releases")
     error_message = "The current installer needs only files and release buckets."

@@ -58,8 +58,9 @@ bun --no-env-file scripts/cloudflare.ts apply --root postgres --instance-dir "$i
 
 Use Neon's **direct endpoint**, not its pooler, with `sslmode=verify-full`. The
 driver passes the DSN from the private file as `TF_VAR_database_url`; it never
-writes it to the generated variables. Terraform state and saved plans still
-contain it. Hyperdrive and migrations use this same connection.
+writes it to the generated variables, and Terraform state keeps only a digest
+of it. Saved plans do contain it, because a plan records its variables: keep
+them private. Hyperdrive and migrations use this same connection.
 
 Hyperdrive keeps up to 20 connections to the database, beside the migration
 runner and your own clients. Give the database room above that: Cloud SQL's
@@ -216,6 +217,6 @@ Cloud SQL deletion protection needs an explicit change before destroy.
 | Cloudflare provider coverage | The provider could manage Workers, Pages, D1 and Hyperdrive, but reproducing the Worker configuration and Durable Object migration history would create a second owner. Only fixed R2, queue, DNS and route resources are managed here. |
 | Hyperdrive to Cloud SQL networking | Public IPv4 with explicit authorized networks for both callers. Setup snapshots Cloudflare's published ranges into the variables; Terraform does not refresh them silently. |
 | TLS to Cloud SQL | Encrypted connections are enforced; the DSN uses `sslmode=require`, which encrypts without verifying the server certificate. Existing databases can use `verify-full` with a registered CA. |
-| Secrets | Database passwords and DSNs are sensitive but **stored in Terraform state and saved plans**. Provider tokens come from the environment; app secrets stay in the private `.env` and the installer state. |
+| Secrets | Cloud SQL's generated password and DSN are sensitive but **stored in Terraform state and saved plans**. An existing database's DSN is in saved plans only. Provider tokens come from the private `.env`; app secrets stay there and in the installer state. |
 | State backend | Local state in the instance directory. For a remote backend, replace the root's `backend` block and run Terraform yourself. |
 | Partial failure and drift | Keep both states and retry. Terraform observes only its own resources; destroy resumes after a partial failure. |
