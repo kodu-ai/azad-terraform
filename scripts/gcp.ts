@@ -37,7 +37,7 @@ import {
 import { join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { z } from "zod"
-import { clerkDns, hostZones } from "./cloudflare"
+import { clerkDns, hostZones, SetupError } from "./cloudflare"
 import {
   appliesSavedPlan,
   assertInitialized,
@@ -63,10 +63,6 @@ import {
   type AppSettings,
   type Source,
 } from "./source"
-
-class SetupError extends Error {
-  name = "SetupError"
-}
 
 const ROOT_NAMES = ["gcp-celld"] as const
 /** The deploy step's state directory, in the instance's Terraform directory. */

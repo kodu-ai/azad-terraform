@@ -387,3 +387,41 @@ test("plan, apply, destroy and refresh need the app source checkout", () => {
     JSON.parse(readFileSync(instance.files.vars, "utf8")).deployment.revision
   ).toBe(instance.source.revision)
 })
+
+test("a failed Cloudflare lookup during setup reports its own reason", () => {
+  const directory = mkdtempSync(join(tmpdir(), "azad-gcp-lookup-"))
+  directories.push(directory)
+  const source = fakeSource(directory)
+  const child = Bun.spawnSync(
+    [
+      process.execPath,
+      "--no-env-file",
+      join(import.meta.dir, "gcp.ts"),
+      "setup",
+      "--credentials",
+      credentials(liveKeys),
+      "--project-id",
+      input.projectId,
+      "--region",
+      input.region,
+      "--web-host",
+      input.webHost,
+      "--account-id",
+      account,
+      "--source",
+      source.path,
+      "--instance-dir",
+      join(directory, "instance"),
+    ],
+    {
+      // Nothing listens on the discard port, so the lookup cannot connect.
+      env: { PATH: process.env.PATH, HTTPS_PROXY: "http://127.0.0.1:9" },
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  )
+  expect(child.exitCode).toBe(1)
+  expect(child.stderr.toString()).toContain(
+    "Setup could not reach api.cloudflare.com"
+  )
+})

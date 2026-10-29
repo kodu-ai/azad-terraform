@@ -57,7 +57,8 @@ import {
  * the private settings (`DIR/.env`), and the root's state, variables, saved
  * plans and the deploy step's state under `DIR/terraform/<root name>/`.
  */
-class SetupError extends Error {
+/** A refusal whose message names inputs, paths and settings, never values. */
+export class SetupError extends Error {
   name = "SetupError"
 }
 
