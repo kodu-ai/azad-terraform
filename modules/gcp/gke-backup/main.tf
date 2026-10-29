@@ -47,11 +47,12 @@ resource "terraform_data" "delete_backups" {
       command -v gcloud >/dev/null || { echo "gcloud is required to delete the plan's backups." >&2; exit 1; }
       api="https://gkebackup.googleapis.com/v1/$PLAN/backups"
       for attempt in $(seq 1 60); do
-        token=$(gcloud auth print-access-token)
-        names=$(curl -fsS -H "Authorization: Bearer $token" "$api?pageSize=500" | python3 -c 'import json,sys; [print(b["name"]) for b in json.load(sys.stdin).get("backups", [])]')
+        # The access token reaches curl on stdin (-H @-), never its command line.
+        auth="Authorization: Bearer $(gcloud auth print-access-token)"
+        names=$(printf '%s\n' "$auth" | curl -fsS -H @- "$api?pageSize=500" | python3 -c 'import json,sys; [print(b["name"]) for b in json.load(sys.stdin).get("backups", [])]')
         [ -z "$names" ] && exit 0
         for name in $names; do
-          curl -fsS -X DELETE -H "Authorization: Bearer $token" "https://gkebackup.googleapis.com/v1/$name?force=true" >/dev/null || true
+          printf '%s\n' "$auth" | curl -fsS -X DELETE -H @- "https://gkebackup.googleapis.com/v1/$name?force=true" >/dev/null || true
         done
         echo "Waiting for $(echo "$names" | wc -l | tr -d ' ') backup(s) to be deleted"
         sleep 10
