@@ -388,6 +388,23 @@ test("plan, apply, destroy and refresh need the app source checkout", () => {
   ).toBe(instance.source.revision)
 })
 
+test("--help prints the usage without an instance directory", () => {
+  for (const flag of ["--help", "-h", "help"]) {
+    const child = Bun.spawnSync(
+      [
+        process.execPath,
+        "--no-env-file",
+        join(import.meta.dir, "gcp.ts"),
+        flag,
+      ],
+      { env: { PATH: process.env.PATH }, stdout: "pipe", stderr: "pipe" }
+    )
+    expect(child.exitCode).toBe(0)
+    expect(child.stdout.toString()).toStartWith("Usage: gcp.ts setup ")
+    expect(child.stderr.toString()).toBe("")
+  }
+})
+
 test("a failed Cloudflare lookup during setup reports its own reason", () => {
   const directory = mkdtempSync(join(tmpdir(), "azad-gcp-lookup-"))
   directories.push(directory)

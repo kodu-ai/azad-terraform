@@ -517,6 +517,24 @@ export async function planBootstrap(
   }
 }
 
+/**
+ * Takes the state directory's lock, which one bootstrap holds while it runs.
+ *
+ * @throws BootstrapError when another bootstrap holds it, or an interrupted
+ * one left it behind.
+ */
+function lockStateDirectory(lock: string): number {
+  try {
+    return openSync(lock, "wx", 0o600)
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST")
+      throw new BootstrapError(
+        `${lock} exists: another bootstrap is running, or one was interrupted. Remove it only after confirming the process ID it records has ended; keep every other file.`
+      )
+    throw error
+  }
+}
+
 /** Creates scoped tokens in private local Terraform state, resumes only matching state, and writes a value-free receipt plus private dotenv handoff. */
 export async function applyBootstrap(
   config: BootstrapConfig,
@@ -535,7 +553,7 @@ export async function applyBootstrap(
       "Bootstrap state directory must be private (mode 0700) and not a symlink."
     )
   const lock = join(stateDir, "bootstrap.lock")
-  const fd = openSync(lock, "wx", 0o600)
+  const fd = lockStateDirectory(lock)
   try {
     writeFileSync(fd, String(process.pid))
     const receiptPath = join(stateDir, "receipt.json")
@@ -729,17 +747,34 @@ export async function applyBootstrap(
   }
 }
 
+const USAGE =
+  "Usage: bootstrap.ts plan|apply --config FILE --bootstrap-file PRIVATE_ENV --state-dir PRIVATE_DIRECTORY [--source APP_CHECKOUT]\n--source may instead come from AZAD_SOURCE; without either it is the current directory."
+
+function cliArguments() {
+  try {
+    return parseArgs({
+      options: {
+        config: { type: "string" },
+        "bootstrap-file": { type: "string" },
+        "state-dir": { type: "string" },
+        source: { type: "string" },
+        help: { type: "boolean", short: "h" },
+      },
+      allowPositionals: true,
+      strict: true,
+    })
+  } catch {
+    // An unknown option or a missing value: the usage says what is accepted.
+    throw new BootstrapError(USAGE)
+  }
+}
+
 async function main() {
-  const { values, positionals } = parseArgs({
-    options: {
-      config: { type: "string" },
-      "bootstrap-file": { type: "string" },
-      "state-dir": { type: "string" },
-      source: { type: "string" },
-    },
-    allowPositionals: true,
-    strict: true,
-  })
+  const { values, positionals } = cliArguments()
+  if (values.help || positionals[0] === "help") {
+    process.stdout.write(`${USAGE}\n`)
+    return
+  }
   if (
     positionals.length !== 1 ||
     !["plan", "apply"].includes(positionals[0]) ||
@@ -747,9 +782,7 @@ async function main() {
     !values["bootstrap-file"] ||
     !values["state-dir"]
   )
-    throw new BootstrapError(
-      "Usage: bootstrap.ts plan|apply --config FILE --bootstrap-file PRIVATE_ENV --state-dir PRIVATE_DIRECTORY [--source APP_CHECKOUT]"
-    )
+    throw new BootstrapError(USAGE)
   const config = bootstrapConfigSchema.parse(
     JSON.parse(readFileSync(values.config, "utf8"))
   )

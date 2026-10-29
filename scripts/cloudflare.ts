@@ -699,8 +699,15 @@ const USAGE = `Usage: cloudflare.ts setup --database-provider cloudsql|postgres 
        cloudflare.ts init|output|show|state|validate|import|console [--root cloudsql|postgres] --instance-dir DIR [terraform arguments]
 --source may instead come from AZAD_SOURCE.`
 
+/** Arguments that print the usage instead of running a command. */
+export const HELP = new Set(["--help", "-h", "help"])
+
 async function main() {
   const [command, ...args] = process.argv.slice(2)
+  if (HELP.has(command)) {
+    process.stdout.write(`${USAGE}\n`)
+    return
+  }
   const parsed = parseArgs({
     args,
     options: {

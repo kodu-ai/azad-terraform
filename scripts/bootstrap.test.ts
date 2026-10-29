@@ -460,6 +460,44 @@ test("CLI rejects a non-private bootstrap file without echoing credentials", asy
   expect(f.remote.size).toBe(0)
 })
 
+test("CLI --help prints the usage; an unknown option gets the usage, not a generic failure", () => {
+  const run = (...args: string[]) =>
+    Bun.spawnSync(
+      [
+        process.execPath,
+        "--no-env-file",
+        join(import.meta.dir, "bootstrap.ts"),
+        ...args,
+      ],
+      { env: { PATH: process.env.PATH }, stdout: "pipe", stderr: "pipe" }
+    )
+  for (const flag of ["--help", "-h", "help"]) {
+    const child = run(flag)
+    expect(child.exitCode).toBe(0)
+    expect(child.stdout.toString()).toStartWith(
+      "Usage: bootstrap.ts plan|apply "
+    )
+    expect(child.stderr.toString()).toBe("")
+  }
+  const unknown = run("plan", "--state", "/nowhere")
+  expect(unknown.exitCode).toBe(1)
+  expect(unknown.stdout.toString()).toBe("")
+  expect(unknown.stderr.toString()).toStartWith(
+    "Usage: bootstrap.ts plan|apply "
+  )
+})
+
+test("a held state lock names itself and is left in place", async () => {
+  const f = fixture()
+  const lock = join(f.directory, "bootstrap.lock")
+  writeFileSync(lock, "12345", { mode: 0o600 })
+  await expect(
+    applyBootstrap(config, "fake-bootstrap", f.directory, f.deps)
+  ).rejects.toThrow(`${lock} exists: another bootstrap is running`)
+  expect(readFileSync(lock, "utf8")).toBe("12345")
+  expect(f.remote.size).toBe(0)
+})
+
 test("owned token collisions on later short pages stop fresh bootstrap", async () => {
   const f = fixture()
   await applyBootstrap(config, "fake-bootstrap", f.directory, f.deps)

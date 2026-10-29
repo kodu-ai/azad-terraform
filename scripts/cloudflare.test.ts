@@ -450,6 +450,18 @@ test("--root takes a root name, never a path", () => {
   )
 })
 
+test("--help prints the usage without an instance directory", () => {
+  for (const flag of ["--help", "-h", "help"]) {
+    const child = driver([flag], { PATH: process.env.PATH })
+    expect(child.exitCode).toBe(0)
+    expect(child.stdout.toString()).toStartWith("Usage: cloudflare.ts setup ")
+    expect(child.stderr.toString()).toBe("")
+  }
+  const nothing = driver([], { PATH: process.env.PATH })
+  expect(nothing.exitCode).toBe(1)
+  expect(nothing.stderr.toString()).toContain("No operation runs by default.")
+})
+
 test("init points the backend and working data at the instance; other commands wait for it", async () => {
   const f = layout("terraform-cloudflare-init-")
   const result = await prepareCloudflare(input, app, boundary().fetcher)

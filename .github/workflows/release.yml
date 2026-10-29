@@ -45,7 +45,11 @@ jobs:
           [ ! -e .git ] && [ ! -e node_modules ]
           bun install --frozen-lockfile
           bun test scripts
-          # Each driver starts and asks for its instance directory.
+          # Each driver starts, prints its usage, and asks for its instance
+          # directory before running anything.
+          for driver in cloudflare gcp bootstrap; do
+            bun --no-env-file "scripts/$driver.ts" --help | grep -q "^Usage: $driver.ts "
+          done
           for driver in cloudflare gcp; do
             if output="$(bun --no-env-file "scripts/$driver.ts" plan 2>&1)"; then
               echo "scripts/$driver.ts ran without an instance directory" >&2

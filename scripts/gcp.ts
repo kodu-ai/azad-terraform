@@ -38,7 +38,7 @@ import {
 import { join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { z } from "zod"
-import { clerkDns, hostZones, SetupError } from "./cloudflare"
+import { clerkDns, HELP, hostZones, SetupError } from "./cloudflare"
 import {
   appliesSavedPlan,
   assertInitialized,
@@ -313,6 +313,10 @@ const USAGE = `Usage: gcp.ts setup --credentials FILE --project-id ID --region R
 
 async function main() {
   const [command, ...args] = process.argv.slice(2)
+  if (HELP.has(command)) {
+    process.stdout.write(`${USAGE}\n`)
+    return
+  }
   const parsed = parseArgs({
     args,
     options: {
