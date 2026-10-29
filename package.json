@@ -1,6 +1,6 @@
 {
   "name": "azad-terraform",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "Terraform roots, modules and drivers that install self-hosted Azad on Cloudflare or Google Cloud.",
   "license": "UNLICENSED",
