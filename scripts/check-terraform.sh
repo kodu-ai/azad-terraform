@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline Terraform checks for every root, example and module: formatting,
+# Offline Terraform checks for every root and module: formatting,
 # `init -backend=false` + `validate`, and `terraform test` where tests exist.
 # Tests use mocked providers and plan-only runs, so no credentials or cloud
 # resources are involved. CI runs exactly this; so can you.
@@ -18,7 +18,7 @@ else
   terraform fmt -check -recursive -diff
   directories=()
   while IFS= read -r directory; do directories+=("$directory"); done < <(
-    find roots examples modules -name '*.tf' -not -path '*/.terraform/*' -exec dirname {} \; | sort -u
+    find roots modules -name '*.tf' -not -path '*/.terraform/*' -exec dirname {} \; | sort -u
   )
 fi
 

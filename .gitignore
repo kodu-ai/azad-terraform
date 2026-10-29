@@ -17,8 +17,8 @@ dist/
 **/.installer-state/
 **/.celld-install/
 
-# Roots and examples commit their provider lock files; a module's comes only
-# from testing it on its own.
+# Roots commit their provider lock files; a module's comes only from testing
+# it on its own.
 modules/**/.terraform.lock.hcl
 
 .DS_Store

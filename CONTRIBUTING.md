@@ -23,7 +23,7 @@ push to `main`; run them before opening a pull request:
 | Driver unit tests | `bun test scripts` |
 | Types (Bun's built-in checker) | `bun run typecheck` |
 | TypeScript and JSON formatting (oxfmt) | `bun run format:check`; fix with `bun run format` |
-| Terraform: `fmt -check -recursive`, `init -backend=false` + `validate` for every root, example and module, and `terraform test` where tests exist | `scripts/check-terraform.sh` (or `scripts/check-terraform.sh roots/postgres` for one directory) |
+| Terraform: `fmt -check -recursive`, `init -backend=false` + `validate` for every root and module, and `terraform test` where tests exist | `scripts/check-terraform.sh` (or `scripts/check-terraform.sh roots/postgres` for one directory) |
 
 Every check is offline with respect to your accounts: the driver tests use fake
 HTTP boundaries, a stand-in `terraform` and a stand-in app checkout
@@ -45,7 +45,7 @@ real instance directory.
 - **State.** Nothing an installation owns may be written into this repository.
   The drivers refuse instance paths inside it, and `.gitignore` keeps stray
   Terraform files out of Git.
-- **Lock files.** Roots and examples commit `.terraform.lock.hcl` with hashes
+- **Lock files.** Roots commit `.terraform.lock.hcl` with hashes
   for `linux_amd64`, `linux_arm64`, `darwin_amd64` and `darwin_arm64`. After
   changing a provider version, run
   `terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_amd64 -platform=darwin_arm64`

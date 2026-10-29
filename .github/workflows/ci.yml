@@ -32,7 +32,7 @@ jobs:
           terraform_version: ${{ matrix.terraform }}
           terraform_wrapper: false
       # fmt -check -recursive, then init -backend=false, validate and (mocked,
-      # plan-only) terraform test in every root, example and module.
+      # plan-only) terraform test in every root and module.
       - run: scripts/check-terraform.sh
 
   drivers:

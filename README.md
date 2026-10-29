@@ -192,11 +192,10 @@ root's `backend` block and run Terraform yourself.
 | [`modules/kubernetes/*`](modules/kubernetes) | cert-manager, Forgejo, raw manifests |
 | [`modules/celld/*`](modules/celld) | The celld fleet (StatefulSet with PgBouncer) and the app deploy handoff to `celld-install.ts` |
 | [`modules/clerk/application`](modules/clerk/application) | Deletes an evaluation install's Clerk application on destroy |
-| [`examples/byo-fixtures`](examples/byo-fixtures) | Development aid: a Cloud SQL database and GCS bucket that stand in for customer-owned ones when testing `roots/postgres` |
 
 Only stable, official providers are used: `hashicorp/google`,
-`hashicorp/random`, `hashicorp/kubernetes`, `hashicorp/helm`, `hashicorp/http`
-and `cloudflare/cloudflare`. Each root commits its provider lock file.
+`hashicorp/random`, `hashicorp/kubernetes`, `hashicorp/helm`, `hashicorp/http`,
+`hashicorp/tls` and `cloudflare/cloudflare`. Each root commits its provider lock file.
 [INPUTS.md](INPUTS.md) lists every input and whether it is required, derived,
 generated or defaulted.
 
