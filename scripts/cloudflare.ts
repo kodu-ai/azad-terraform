@@ -552,29 +552,6 @@ export async function prepareCloudflare(
     additions: Object.fromEntries(additions),
     generatedWebhook: !env.GITHUB_WEBHOOK_SECRET?.trim(),
     clerkDns: clerk,
-    onboarding: {
-      web_origin: webOrigin,
-      api_origin: apiOrigin,
-      clerk_webhook: `${apiOrigin}/api/clerk/webhooks`,
-      github_callback: `${apiOrigin}/api/github/install/callback`,
-      github_webhook: `${apiOrigin}/api/github/webhooks`,
-      github_app: githubAppPending
-        ? "pending: register the GitHub App, then replace the GITHUB_APP_* placeholders"
-        : `https://github.com/apps/${app.slug}`,
-      mini_apps: env.V3_CF_API_TOKEN?.trim()
-        ? "configured; live deployment still needs verification"
-        : "not configured; add V3_CF_API_TOKEN to enable Workers/D1 apps",
-      managed_control: env.CLOUDFLARE_ARTIFACTS_API_TOKEN?.trim()
-        ? "configured; verify namespace access and private backup repository before first project publish"
-        : "not configured; supply Artifacts tokens, chosen namespace and private GitHub backup repository for managed project source",
-      external_steps: [
-        "Configure Clerk DNS, allowed origins and webhook",
-        "Configure/install the GitHub App and set its webhook secret from the private file",
-        "Confirm Cloudflare zones and account service entitlements",
-        "Configure a project model resource and pair an agent machine after first login",
-        "Complete the self-host first-use checklist including rerun/upgrade",
-      ],
-    },
     tfvars: {
       gcp: usePostgres
         ? undefined
