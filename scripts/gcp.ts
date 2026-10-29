@@ -17,7 +17,8 @@
  * with the private credential file and writes the instance's
  * terraform.tfvars.json once. The credentials stay in that file: Terraform
  * gets CLOUDFLARE_API_TOKEN from it, and the deploy step (module.app) reads
- * it directly, so no secret enters Terraform state. Google access is
+ * it directly, so none of them enters Terraform state (the secrets Terraform
+ * generates, such as the database password, do). Google access is
  * Application Default Credentials. State, variables, saved plans and the
  * deploy step's keys live in `DIR/terraform/gcp-celld/` (see ./instance.ts).
  *

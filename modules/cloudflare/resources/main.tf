@@ -34,6 +34,5 @@ resource "cloudflare_mtls_certificate" "database_ca" {
 
   lifecycle {
     create_before_destroy = true
-
   }
 }

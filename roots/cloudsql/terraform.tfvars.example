@@ -1,11 +1,15 @@
+# The variables `cloudflare.ts setup --root cloudsql` writes, as JSON, to
+# <instance>/terraform/cloudsql/terraform.tfvars.json. Edit that file rather
+# than copying this one; INPUTS.md describes every field. Example values only.
 gcp = {
-  project_id    = "customer-project-id"
-  region        = "me-central2"
-  # Replace these documentation-only addresses with the current Hyperdrive
-  # egress CIDRs AND your deployment runner's public egress CIDR.
+  project_id = "customer-project-id"
+  # Setup does not write a region; without one Cloud SQL goes to me-central2.
+  region = "europe-west1"
+  # Setup fills these with Cloudflare's published IPv4 ranges (Hyperdrive) and
+  # the public IPv4 of the machine that runs apply (migrations).
   authorized_networks = {
-    hyperdrive-example = "192.0.2.0/24"
-    runner-example     = "198.51.100.10/32"
+    cloudflare-1 = "192.0.2.0/24"
+    runner       = "198.51.100.10/32"
   }
 }
 cloudflare = {
@@ -14,11 +18,11 @@ cloudflare = {
   web_origin = "https://board.example.com"
 }
 deployment = {
-  revision        = "0000000000000000000000000000000000000000" # git rev-parse HEAD
+  revision        = "0000000000000000000000000000000000000000" # the source checkout's HEAD
+  env_file        = "/home/you/.azad/instances/default/.env"
+  state_directory = "/home/you/.azad/instances/default/terraform/cloudsql/installer-state"
 }
-# Optional future module contract. Does not enable GCS or create a bucket.
-# storage_extension = {
-#   project_id     = "customer-project-id"
-#   location       = "me-central2"
-#   files_bucket   = "customer-azad-files"
-# }
+host_zones = {
+  "board.example.com"     = "11111111111111111111111111111111"
+  "api.board.example.com" = "11111111111111111111111111111111"
+}

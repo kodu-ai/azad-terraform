@@ -1,8 +1,7 @@
 # Own-infrastructure composition on Google Cloud: celld fleets on GKE Autopilot
 # with state in GCS behind a regional GKE Gateway, Cloud SQL through the Cloud
 # SQL Auth Proxy, Cloudflare for DNS (and optionally its proxy), and the app
-# deployed by module.app. The cloud-neutral fleet module is the same one the
-# local and other cloud bases use.
+# deployed by module.app. Both fleets use the cloud-neutral modules/celld/fleet.
 
 locals {
   api_host  = "api.${var.web_host}"

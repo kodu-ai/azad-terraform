@@ -1,10 +1,23 @@
-# Supply DATABASE_URL through the instance's private .env and cloudflare.ts;
-# setup writes the instance's terraform.tfvars.json with these fields.
+# The variables `cloudflare.ts setup --root postgres` writes, as JSON, to
+# <instance>/terraform/postgres/terraform.tfvars.json. Edit that file rather
+# than copying this one; INPUTS.md describes every field. Example values only.
+# DATABASE_URL stays in the instance's private .env: the driver passes it to
+# Terraform as TF_VAR_database_url, never through this file.
 cloudflare = {
   account_id = "00000000000000000000000000000000"
   api_origin = "https://api.board.example.com"
   web_origin = "https://board.example.com"
 }
 deployment = {
-  revision = "0000000000000000000000000000000000000000"
+  revision        = "0000000000000000000000000000000000000000" # the source checkout's HEAD
+  env_file        = "/home/you/.azad/instances/default/.env"
+  state_directory = "/home/you/.azad/instances/default/terraform/postgres/installer-state"
 }
+host_zones = {
+  "board.example.com"     = "11111111111111111111111111111111"
+  "api.board.example.com" = "11111111111111111111111111111111"
+}
+# Only with AZAD_SELF_HOST_DATABASE_CA=neon-isrg-root-x1 in the .env:
+# database_ca = "neon-isrg-root-x1"
+# Only with STORAGE_* in the .env (your own bucket instead of R2):
+# storage = { adapter = "gcs", bucket = "customer-azad-files" }
