@@ -1,0 +1,34 @@
+;; PgBouncer between the ${fleet} Worker and PostgreSQL, rendered by
+;; terraform/modules/celld/fleet. The Worker opens one connection per request;
+;; PgBouncer hands it a warm server connection instead of a new one.
+
+[databases]
+${database} = host=${server_host} port=${server_port} dbname=${database}
+
+[pgbouncer]
+;; Only the containers of this pod reach it.
+listen_addr = 127.0.0.1
+listen_port = ${port}
+unix_socket_dir =
+
+;; The auth file holds the database user's password: PgBouncer checks the
+;; Worker with it and logs in to PostgreSQL with it.
+auth_type = scram-sha-256
+auth_file = /etc/pgbouncer-auth/userlist.txt
+
+;; A server connection serves one transaction at a time, as behind Hyperdrive.
+;; The Worker keeps no session state between transactions: unnamed statements,
+;; SET LOCAL / set_config(..., true) and transaction-scoped advisory locks only.
+pool_mode = transaction
+default_pool_size = ${pool_size}
+min_pool_size = ${min_pool_size}
+max_client_conn = ${max_client_connections}
+
+;; The local endpoint (the Cloud SQL Auth Proxy) adds TLS itself.
+server_tls_sslmode = disable
+;; The endpoint can start after PgBouncer; retry a failed login quickly.
+server_login_retry = 1
+
+;; One client connection per Worker request; logging each floods the log.
+log_connections = 0
+log_disconnections = 0

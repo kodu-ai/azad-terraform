@@ -1,0 +1,10 @@
+# Supply DATABASE_URL through the instance's private .env and cloudflare.ts;
+# setup writes the instance's terraform.tfvars.json with these fields.
+cloudflare = {
+  account_id = "00000000000000000000000000000000"
+  api_origin = "https://api.board.example.com"
+  web_origin = "https://board.example.com"
+}
+deployment = {
+  revision = "0000000000000000000000000000000000000000"
+}

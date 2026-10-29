@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Publish ${{ github.ref_name }}
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.4"
+      - run: bun install --frozen-lockfile
+      # Refuses a tag other than v<package.json version>.
+      - name: Build the release assets
+        run: bun scripts/release.ts --tag "$GITHUB_REF_NAME" --out "$RUNNER_TEMP/dist"
+      - name: Prove the archive installs and runs on its own
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cd "$RUNNER_TEMP/dist"
+          sha256sum --check "azad-terraform-$version.tar.gz.sha256"
+          mkdir extracted
+          tar -xzf "azad-terraform-$version.tar.gz" -C extracted
+          [ "$(ls extracted)" = "azad-terraform-$version" ]
+          cd "extracted/azad-terraform-$version"
+          [ ! -e .git ] && [ ! -e node_modules ]
+          bun install --frozen-lockfile
+          bun test scripts
+          # Each driver starts and asks for its instance directory.
+          for driver in cloudflare gcp; do
+            if output="$(bun --no-env-file "scripts/$driver.ts" plan 2>&1)"; then
+              echo "scripts/$driver.ts ran without an instance directory" >&2
+              exit 1
+            fi
+            grep -q -- "--instance-dir" <<<"$output"
+          done
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "$RUNNER_TEMP/dist/azad-terraform-$version.tar.gz" \
+            "$RUNNER_TEMP/dist/azad-terraform-$version.tar.gz.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

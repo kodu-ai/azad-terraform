@@ -1,0 +1,24 @@
+gcp = {
+  project_id    = "customer-project-id"
+  region        = "me-central2"
+  # Replace these documentation-only addresses with the current Hyperdrive
+  # egress CIDRs AND your deployment runner's public egress CIDR.
+  authorized_networks = {
+    hyperdrive-example = "192.0.2.0/24"
+    runner-example     = "198.51.100.10/32"
+  }
+}
+cloudflare = {
+  account_id = "00000000000000000000000000000000"
+  api_origin = "https://api.board.example.com"
+  web_origin = "https://board.example.com"
+}
+deployment = {
+  revision        = "0000000000000000000000000000000000000000" # git rev-parse HEAD
+}
+# Optional future module contract. Does not enable GCS or create a bucket.
+# storage_extension = {
+#   project_id     = "customer-project-id"
+#   location       = "me-central2"
+#   files_bucket   = "customer-azad-files"
+# }

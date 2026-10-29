@@ -1,0 +1,24 @@
+# Dependencies and release builds
+node_modules/
+dist/
+
+# The drivers keep each installation's state, variables, plans and settings in
+# its instance directory (~/.azad/instances/<name>), never here. These
+# patterns keep what a hand-run `terraform` writes into a root out of Git.
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/crash.log
+**/crash.*.log
+**/*.tfvars
+**/*.tfvars.json
+**/.env*
+**/.installer-state/
+**/.celld-install/
+
+# Roots and examples commit their provider lock files; a module's comes only
+# from testing it on its own.
+modules/**/.terraform.lock.hcl
+
+.DS_Store
