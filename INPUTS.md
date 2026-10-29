@@ -1,192 +1,234 @@
-# Customer inputs: what is actually necessary
+# Inputs
 
-The full reference contains optional application features, not 50 required setup
-questions. The recommended `cloudflare.ts setup` flow asks for the **database
-provider/region and web hostname**, seven external application credential fields,
-and the selected database provider access: Google ADC plus project ID for Cloud
-SQL, or an existing direct PostgreSQL connection string.
-It generates the remaining configuration. No application requirement was removed.
+Everything an installation needs, where it lives and who fills it in. The
+[README](README.md) has the short version; this is the full list.
 
-## Provider selection
+## Where each input lives
 
-Choose `--database-provider cloudsql` with `--project-id` and Google ADC, or
-`--database-provider postgres` with `--root postgres`.
-The Postgres composition reads `DATABASE_URL` from the selected private file and
-passes it as sensitive `TF_VAR_database_url`. No database provisioning provider,
-Google credentials or discovered SQL CIDRs are used for that path. Its existing
-database account/region and owner credentials are customer choices. Neon works
-through its direct endpoint with verified TLS. Its unsupported community Terraform
-provider is not used. Clerk account creation remains external to Terraform.
-
-## Required from the customer
-
-| Input | Why it cannot be invented / where it comes from | Secret? |
+| Place | What goes there | Who writes it |
 | --- | --- | --- |
-| Google authentication (ADC/workload identity), Cloud SQL only | Authority in the customer's billed GCP project. Use an existing login or identity configuration; there is no `gcp_token` field. | Yes |
-| `--project-id` → `gcp.project_id`, Cloud SQL only | Which existing Google project to use, from its console | No |
-| `AZAD_SELF_HOST_DATABASE_CA`, for automatic Neon CA registration | `neon-isrg-root-x1`; Terraform registers the OS-trusted public CA and supplies its ID during apply | No |
-| `AZAD_SELF_HOST_DATABASE_CA_CERT_ID`, for existing-CA `verify-full` | Existing account-scoped CA ID, mutually exclusive with the automatic selector; direct runner trusts the public chain | No |
-| `DATABASE_URL`, existing Postgres only | Direct PostgreSQL schema-owner connection from the database provider; explicit TLS required | Yes |
-| `--web-host` | The customer's chosen web hostname, e.g. `board.example.com`; API defaults to `api.board.example.com` | No |
-| `CLOUDFLARE_API_TOKEN` | Deployment token restricted to the customer's account/zones, from Cloudflare API Tokens | Yes |
-| `CLERK_PUBLISHABLE_KEY` | Existing customer Clerk application → API Keys | No |
-| `CLERK_SECRET_KEY` | Same application's secret API key | Yes |
-| `CLERK_WEBHOOK_SECRET` | Signing secret of its configured Azad webhook | Yes |
-| `GITHUB_APP_ID` | Existing customer GitHub App ID | No |
-| `GITHUB_APP_PRIVATE_KEY` | PEM key generated in that App's settings | Yes |
-| `GITHUB_APP_CLIENT_SECRET` | OAuth client secret generated in that App's settings | Yes |
+| Your shell | `AZAD_SOURCE`, Google credentials, proxy settings | You |
+| `<instance>/.env` (mode 0600) | Credentials and app settings. Setup reads it, the drivers take `CLOUDFLARE_API_TOKEN` and `DATABASE_URL` from it, and the deploy reads all of it | You, plus a few keys setup adds |
+| `<instance>/terraform/<root>/terraform.tfvars.json` | Non-secret Terraform variables | Setup writes it once; you edit it afterwards |
+| Terraform state, `installer-state/`, `celld-install/` | Generated passwords, keys and the deploy's own state | Terraform and the deploy |
 
-The seven fields in [credentials.env.example](credentials.env.example) are the
-Cloudflare token, three Clerk fields and three GitHub fields. That private file is
-passed by path; do not paste secrets into command-line flags. Optional provider
-keys are not necessary for infrastructure/app installation. Agent/model use still
-needs a configured machine and provider after installation.
+`<instance>` is the directory you pass as `--instance-dir`, for example
+`~/.azad/instances/default`. `<root>` is `postgres`, `cloudsql` or `gcp-celld`.
 
-Google needs Cloud SQL management/API enablement (typically
-`roles/cloudsql.admin` + `roles/serviceusage.serviceUsageAdmin`). A user ADC quota
-project also needs `serviceusage.services.use`, commonly Service Usage Consumer.
-The optional [administrator token bootstrap](docs/token-bootstrap.md)
-creates the deployment token and optional Mini Apps token from one separately
-protected user-token management credential. Existing manually supplied tokens
-remain supported. The bootstrap secret never belongs in this credential file.
+## Your shell
 
-The Cloudflare deployment token needs Account Settings Read, Workers Scripts
-Edit, Workers R2 Storage Edit, Queues Edit, Hyperdrive Edit, Cloudflare Pages Edit,
-Workers Routes Edit, Zone Read and DNS Edit. The helper reuses this one selected
-token for Terraform and the installer; there is no second token copy/export.
-
-## Derivable: no customer typing
-
-| Input | How it is filled / override |
-| --- | --- |
-| `cloudflare.account_id` | Read the token's accessible accounts; accept exactly one. If ambiguous, setup asks for `--account-id`. |
-| Zone IDs | Installer discovers authoritative zones from the account and hostnames. No Terraform zone ID variable. |
-| `cloudflare.web_origin`, `cloudflare.api_origin` | Build HTTPS origins from `--web-host`; change the generated tfvars for a different API hostname before first apply. |
-| `gcp.authorized_networks` | Read Cloudflare's published IPv4 ranges plus the setup machine's public IPv4 from Cloudflare trace. Use `--runner-cidr` for direct PostgreSQL TCP egress if apply runs elsewhere, HTTP proxy variables are set, routing differs for TCP, or detection returns IPv6. Review the generated CIDRs. These are shared Cloudflare ranges. |
-| `gcp.instance_name` | If omitted, base derives `azad-<12-character API-origin hash>`. Explicit names remain supported, with combined `project_id:instance_name` length <=98. |
-| Worker, Pages, R2, queue, Hyperdrive names | Derived from API origin using the existing installer naming contract. No extra name inputs. |
-| `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID` | Authenticated read of GitHub `/app` using the supplied App ID/private key |
-| `deployment.revision` | The `HEAD` of the Azad source checkout (`--source`) during setup. `refresh` updates only this field for later source revisions. |
-| `source_dir` | The drivers pass `--source` (or `AZAD_SOURCE`) to Terraform as `TF_VAR_source_dir` on every command that deploys or uninstalls; it is never written to the variables file, so the checkout may move. |
-| `DATABASE_URL`, Cloud SQL only | Terraform builds it from provisioned SQL host/database/user/password. Never type it into the setup file. |
-| Installer `CLOUDFLARE_ACCOUNT_ID`, `AZAD_SELF_HOST_API_ORIGIN`, `AZAD_SELF_HOST_WEB_ORIGIN`, `AZAD_SELF_HOST_STATE_DIR` | The deploy handoff (`modules/installation`) fills them from Terraform inputs and outputs; duplicate values in the private dotenv are overridden. |
-| `V3_CF_ACCOUNT_ID` | Setup copies the selected Cloudflare account when a Mini App runtime token or managed Artifacts token is supplied. |
-
-Setup reads account/app metadata and public network information. It creates no
-cloud resources and does not run Terraform. It requires network access for those
-lookups; it does not silently guess when account/IP discovery is ambiguous.
-
-## Generated: retained, not re-entered
-
-| Input | Owner / retention |
-| --- | --- |
-| `database_password`, Cloud SQL only | Terraform `random_password` creates a 32-character password when omitted and retains it in state. An explicit sensitive override remains available for imports/existing users. Keep that override until deliberately rotating it. |
-| `GITHUB_WEBHOOK_SECRET` | Setup preserves an existing supplied value, or generates it once into the private installer file. Copy the generated value into GitHub App webhook settings before apply. Setup does not modify the GitHub App. |
-| `REALTIME_UPGRADE_SECRET`, `MEDIA_CAPABILITY_SECRET`, `INTERNAL_API_SECRET`, `AGENT_TASK_SECRET_CIPHER_KEY`, `VAPID_PRIVATE_JWK`, `MINIAPP_TOKEN_PRIVATE_JWK`, release signing key | Existing installer generates them and preserves them in its state directory. Back up that directory. |
-
-Terraform passwords/DSNs, including generated ones, remain in state and saved
-plans. Choose a customer-controlled backend before real use. The private installer
-file contains external keys and the generated GitHub webhook secret. The helper
-writes it with mode 0600 and refuses to overwrite existing setup files, so reruns
-cannot silently rotate the webhook or discard customer overrides.
-
-## Defaultable: infrastructure and file locations
-
-| Input | Default; override only when needed |
-| --- | --- |
-| `gcp.region` | `me-central2` (Dammam); review customer access before apply |
-| `gcp.tier`, `gcp.availability_type` | `db-custom-2-7680` (2 vCPU / 7.5 GiB), `ZONAL` |
-| `gcp.disk_size_gb`, `gcp.deletion_protection` | `20`, `true` |
-| `gcp.database_name`, `gcp.username`, `gcp.labels` | `azad`, `azad`, `{}` |
-| `deployment.env_file`, `deployment.state_directory` | Setup writes the instance directory's `.env` and `terraform/<root name>/installer-state` as absolute paths; the drivers refuse relative paths or paths inside this repository. Terraform's own defaults (`.env.self-host`, `.installer-state`, relative to the root) apply only to plain `terraform` runs. |
-| `deployment.enabled` | `true`; `false` is infrastructure only |
-| `storage` | `{ adapter = "r2" }`: this installation's two R2 buckets. Setup derives `{ adapter = "s3" \| "gcs", bucket, releases_bucket?, endpoint?, region? }` from `STORAGE_*` in the credential file to use your own bucket instead; no R2 bucket is then created or bound, and Agent Connect releases share the bucket unless `releases_bucket` names another. `STORAGE_ACCESS_KEY_ID`/`STORAGE_SECRET_ACCESS_KEY` stay in the private installer file. |
-| `host_zones` | Setup resolves the zone of the web and API hosts. Terraform reserves both hosts from zone-wide Workers routes with hostname routes that run no Worker; `{}` reserves nothing. |
-| `github_app_pending` | `false`. Setup sets `true` from `AZAD_SELF_HOST_GITHUB_APP_PENDING=1`: deploy before the GitHub App exists. Only GitHub's App identity check is skipped; the `GITHUB_APP_*` placeholders are deployed, GitHub sign-in/repositories/webhooks fail, and the `github_app` output and installer summary say PENDING until the real App replaces them. |
-| `AZAD_SELF_HOST_MINIAPPS` | Setup explicitly writes `disabled` when no runtime token was supplied. To enable Mini Apps, supply `V3_CF_API_TOKEN` (Workers Scripts Edit + D1 Edit in the same account); setup derives its account ID. |
-
-For Cloud SQL, Postgres17, SSD/autogrowth, backups/PITR and encrypted public connections are fixed
-module settings. Region is a default to review, not something inferred from the
-authenticated Google identity. The reusable modules still accept advanced overrides.
-
-## Defaultable: optional features, off unless supplied
-
-These are advanced overrides in the private credential file, not setup questions. Empty or omitted optional feature
-settings remove that configured value on the next installer run. “Unset” below
-means the installer supplies no value; the application's own fallback can apply.
-
-| Variable(s) | Default / purpose / source | Secret? |
+| Name | Needed for | What it does |
 | --- | --- | --- |
-| `AZAD_SELF_HOST_ENV` | `production`; persistent installer identity label chosen by operator | No |
-| `AZAD_INSTANCE_NAME` | `Azad`; customer display name | No |
-| `AZAD_INSTANCE_EMOJI`, `AZAD_INSTANCE_IMAGE_URL` | Unset; optional branding chosen by customer | No |
-| `AZAD_SELF_HOST_PLACEMENT_REGION` | Unset; optional Cloudflare placement hint, not data residency | No |
-| `VAPID_SUBJECT` | `mailto:admin@<web-host>`; customer contact | No |
-| `AZAD_AGENT_RELEASE_SOURCE` | `https://api.azad.pro`; trusted Agent Connect release source | No |
-| `PUSH_RELAY_URL` | `https://push.azad.pro`; native push needs a separate relay claim | No |
-| `RESEND_API_KEY` | Unset; Resend dashboard key for email, paired with `EMAIL_FROM` | **Yes** |
-| `EMAIL_FROM`, `RESEND_DOMAIN` | Unset; verified sender and optional domain metadata from customer Resend setup | No |
-| `SENTRY_DSN` | Unset; Sentry project client-ingestion DSN, optional error reporting | Not an admin credential; keep in selected configuration |
-| `SENTRY_ENVIRONMENT`, `SENTRY_TRACES_SAMPLE_RATE` | Unset; operator label and rate from 0 to 1. The example chooses `production` and `0`. | No |
-| `CLOUDFLARE_REALTIMEKIT_ACCOUNT_ID`, `CLOUDFLARE_REALTIMEKIT_APP_ID` | Unset; customer RealtimeKit account/app IDs; configure both with its token | No |
-| `CLOUDFLARE_REALTIMEKIT_API_TOKEN` | Unset; RealtimeKit token from Cloudflare for that app. The installer (and `azad --provision-meetings`) creates the app and a token with only the account's Realtime permission | **Yes** |
-| `CLOUDFLARE_REALTIMEKIT_PRESET_NAME`, `CLOUDFLARE_REALTIMEKIT_PARTICIPANT_PRESET_NAME`, `CLOUDFLARE_REALTIMEKIT_VOICE_PRESET_NAME`, `CLOUDFLARE_REALTIMEKIT_VOICE_PARTICIPANT_PRESET_NAME` | Unset; preset names created in the customer's RealtimeKit app for the desired meeting roles | No |
-| `OPENAI_API_KEY` | Unset; OpenAI project key for optional meeting/title functionality | **Yes** |
-| `OPENAI_MEETING_TITLE_MODEL` | Unset; optional model selection | No |
-| `KLIPY_API_KEY` | Unset; optional GIF provider key from Klipy | **Yes** |
-| `AZAD_HOSTED_MEDIA_PROJECT_ID` | Unset; optional existing Azad project that funds hosted media. Without it, each project funds its own. | No |
+| `AZAD_SOURCE` | `setup`, `refresh`, `plan`, `apply`, `destroy`, unless you pass `--source` | Path of the Azad app checkout (a clone of `kodu-ai/azad-ide-web` with `bun install` done). The drivers check that it is the checkout's top level with the `scripts/self-host` entrypoints and installed dependencies, and bind the deploy to its `HEAD`. Read-only commands (`init`, `output`, `show`, `state`, `phase`) don't need it. |
+| Google Application Default Credentials | `cloudsql` and `gcp-celld` | `gcloud auth application-default login` (or `GOOGLE_APPLICATION_CREDENTIALS`). Terraform's Google provider and the Google Cloud deploy use them. |
+| `gcloud` signed in | `gcp-celld` | `gcloud auth login`. Destroy uses the gcloud CLI to wait for the cluster's disks and, for an evaluation install, to delete its backups. |
+| `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` | `cloudsql` setup | When one is set, setup can't see your direct egress address and asks for `--runner-cidr`. |
+| `TF_VAR_database_password` | Optional, `cloudsql` | Use this Cloud SQL password instead of a generated one, for example when adopting an existing user. Keep it set until you rotate on purpose. |
+| `AZAD_PUSH_RELAY_SESSION_TOKEN` | Optional, `gcp-celld` | A short-lived azad.pro session token that lets one deploy claim native push access ([docs/google-cloud.md](docs/google-cloud.md#native-push-for-the-mobile-apps)). Never written to a file. |
 
-Normal agent/model usage still needs a machine and project model/provider setup
-after installation. The optional keys above do not provision those machines.
+`CLOUDFLARE_API_TOKEN` does **not** come from your shell: the drivers read it
+from the instance's `.env` and hand it to Terraform, overriding any exported
+value.
 
-The installer generates and preserves
-`REALTIME_UPGRADE_SECRET`, `MEDIA_CAPABILITY_SECRET`, `INTERNAL_API_SECRET`,
-`AGENT_TASK_SECRET_CIPHER_KEY`, `VAPID_PRIVATE_JWK`, `MINIAPP_TOKEN_PRIVATE_JWK`
-and the Agent Connect release signing key. Customers do not generate these inputs;
-they must retain/back up the installer state directory.
+The drivers also set these for Terraform; you never set them yourself:
+`TF_DATA_DIR` (the instance's `.terraform/`), `TF_VAR_source_dir` (from
+`--source`), `TF_VAR_database_url` (from `DATABASE_URL` in the `.env`) and
+`TF_VAR_database_ca_pem` (ISRG Root X1 from this machine's trust store, only
+with `database_ca`).
 
-## Outside Terraform: actual onboarding actions
+## The instance `.env`
 
-The customer still needs billing/region access, Cloudflare service entitlements
-(Workers Paid, R2, Queues, Hyperdrive, Pages, DO and Worker Loader), and DNS zones
-delegated to the selected Cloudflare account. Choose/provision the state backend.
+Start from [credentials.env.example](credentials.env.example). Values are
+dotenv strings; a multi-line PEM key goes in double quotes with `\n` for each
+newline. Keep the file private (`chmod 600`). Setup never replaces it; it only
+adds the keys marked "setup adds" below.
 
-Create/configure the existing Clerk application and GitHub App using the
-[self-host instructions](https://github.com/kodu-ai/azad-ide-web/blob/main/docs/self-hosting.md#clerk-application): production DNS,
-allowed origins, OAuth callbacks, App installation/permissions and webhooks. The
-helper cannot generate valid external app credentials or consent. Its generated
-GitHub webhook secret must be entered in the App settings. Finish first-use
-acceptance and machine/provider setup after deployment.
+### Cloudflare (`postgres` and `cloudsql` roots)
 
-## Removable from the setup checklist
+| Key | Required? | What it's for | Example |
+| --- | --- | --- | --- |
+| `CLOUDFLARE_API_TOKEN` | Yes | Terraform and the deploy ([permissions](#the-cloudflare-api-token)) | |
+| `CLERK_PUBLISHABLE_KEY` | Yes | Your Clerk application | `pk_live_…` |
+| `CLERK_SECRET_KEY` | Yes | Same application. With a live key, setup reads Clerk's DNS targets so Terraform can add them | `sk_live_…` |
+| `CLERK_WEBHOOK_SECRET` | Yes | Signing secret of the Clerk webhook to `https://api.<web-host>/api/clerk/webhooks` | `whsec_…` |
+| `GITHUB_APP_ID` | Yes | Your GitHub App | `123456` |
+| `GITHUB_APP_PRIVATE_KEY` | Yes | A private key generated in the App's settings | `"-----BEGIN RSA PRIVATE KEY-----\n…"` |
+| `GITHUB_APP_CLIENT_SECRET` | Yes | A client secret generated in the App's settings | |
+| `DATABASE_URL` | `postgres` root only | Direct (not pooled) connection as the schema owner, PostgreSQL 17 or newer, with exactly one query option: `sslmode=require` or `sslmode=verify-full` | `postgresql://azad:…@ep-x-123.eu-central-1.aws.neon.tech/azad?sslmode=verify-full` |
+| `AZAD_SELF_HOST_DATABASE_CA` | With `verify-full` on a Neon direct endpoint (or the next key) | `neon-isrg-root-x1`: Terraform registers Neon's public CA, taken from this machine's OS trust store, so Hyperdrive verifies the database | `neon-isrg-root-x1` |
+| `AZAD_SELF_HOST_DATABASE_CA_CERT_ID` | With `verify-full` otherwise | ID of a CA certificate already uploaded to your Cloudflare account; not together with the previous key | |
+| `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID` | No: setup adds them | Read from GitHub with the App's key | `my-azad`, `Iv23li…` |
+| `GITHUB_WEBHOOK_SECRET` | No: setup adds one | Kept if present, generated otherwise. Copy it into the App's webhook settings | 64 hex characters |
+| `AZAD_SELF_HOST_MINIAPPS` | No: setup adds it | `enabled` with `V3_CF_API_TOKEN`, `disabled` without | `disabled` |
+| `V3_CF_API_TOKEN` | No | Turns on Mini Apps: Workers Scripts Edit and D1 Edit in the same account. Setup then adds `V3_CF_ACCOUNT_ID` | |
+| `STORAGE_ADAPTER`, `STORAGE_BUCKET`, `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY` | No | Your own bucket instead of R2: `gcs` (HMAC keys) or `s3`. `s3` also needs `STORAGE_REGION`, and `STORAGE_ENDPOINT` outside AWS. `STORAGE_RELEASES_BUCKET` puts Agent Connect releases in a second bucket | `gcs`, `my-azad-files` |
+| `AZAD_SELF_HOST_GITHUB_APP_PENDING` | No | `1` deploys before the GitHub App exists. Put placeholders in every `GITHUB_APP_*` key, including the slug and client ID; GitHub features stay off until you replace them, set `github_app_pending` to `false` and apply | `1` |
 
-For Cloud SQL, do not ask customers for generated database passwords. Existing
-Postgres still needs its owner DSN. Do not ask for internal encryption keys, duplicate
-account/origin values, resource names, source revisions, state paths, zone IDs or
-optional feature keys when defaults/derivation above handle them. No app credential
-has been removed from the runtime merely to shorten the checklist.
+`CLOUDFLARE_ACCOUNT_ID`, `AZAD_SELF_HOST_API_ORIGIN`,
+`AZAD_SELF_HOST_WEB_ORIGIN` and `AZAD_SELF_HOST_STATE_DIR` come from Terraform
+during the deploy; values in the `.env` are overridden.
 
-## Managed project source: now supported by the installer
+### Google Cloud (`gcp-celld` root)
 
-For a complete managed-source installation, supply these runtime settings in the
-private credential file (separate from Terraform provider tokens):
+| Key | Required? | What it's for | Example |
+| --- | --- | --- | --- |
+| `CLOUDFLARE_API_TOKEN` | Yes | DNS records (and, with `cloudflare_proxy`, certificates) in your zone ([permissions](#the-cloudflare-api-token)) | |
+| `CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` | Yes | Your Clerk application; both live or both test keys | `pk_live_…`, `sk_live_…` |
+| `CLERK_WEBHOOK_SECRET` | No | Until it is set, users sync on sign-in only | `whsec_…` |
+| `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY` | All five or none | Your GitHub App. Without it, repository features are off | |
+| `GITHUB_WEBHOOK_SECRET` | No | Generated into `celld-install/secrets.json` when missing; copy it into the App's webhook settings | |
+| `AZAD_CLI_CLERK_APP_ID` | No | Written by the `azad` CLI when it created the Clerk application. Setup records it, and an `--evaluation` install deletes that application on destroy | `app_…` |
 
-| Input | Source / behavior |
+Managed project repositories on Google Cloud live in the installation's own
+Forgejo, which Terraform sets up; Cloudflare Artifacts settings are ignored
+there.
+
+### Optional features
+
+Leave these out unless you want the feature. On Cloudflare, an empty or
+missing value removes a setting a previous deploy had.
+
+| Key | Default and purpose | Secret? |
+| --- | --- | --- |
+| `AZAD_INSTANCE_NAME` | `Azad`; the name people see | No |
+| `AZAD_INSTANCE_EMOJI`, `AZAD_INSTANCE_IMAGE_URL` | Unset; branding | No |
+| `VAPID_SUBJECT` | `mailto:admin@<web-host>` on Cloudflare; a `mailto:` or `https:` contact for web push | No |
+| `PUSH_RELAY_URL` | `https://push.azad.pro`; native push relay | No |
+| `AZAD_AGENT_RELEASE_SOURCE` | `https://api.azad.pro`; where Agent Connect releases are mirrored from | No |
+| `RESEND_API_KEY` with `EMAIL_FROM` (and optional `RESEND_DOMAIN`) | Unset; email through Resend | **Yes** (the key) |
+| `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_TRACES_SAMPLE_RATE` | Unset; error reporting (rate from 0 to 1) | No |
+| `CLOUDFLARE_REALTIMEKIT_ACCOUNT_ID`, `CLOUDFLARE_REALTIMEKIT_APP_ID`, `CLOUDFLARE_REALTIMEKIT_API_TOKEN` | Unset; meetings. All three together; the `azad` CLI can create the app and a Realtime-only token (`azad --provision-meetings`) | **Yes** (the token) |
+| `CLOUDFLARE_REALTIMEKIT_PRESET_NAME`, `CLOUDFLARE_REALTIMEKIT_PARTICIPANT_PRESET_NAME`, `CLOUDFLARE_REALTIMEKIT_VOICE_PRESET_NAME`, `CLOUDFLARE_REALTIMEKIT_VOICE_PARTICIPANT_PRESET_NAME` | Unset; preset names in that RealtimeKit app | No |
+| `OPENAI_API_KEY`, `OPENAI_MEETING_TITLE_MODEL` | Unset; meeting titles | **Yes** (the key) |
+| `KLIPY_API_KEY` | Unset; GIF search | **Yes** |
+| `AZAD_HOSTED_MEDIA_PROJECT_ID` | Unset; an Azad project that pays for every project's transcription and speech. Unset: each project pays for its own | No |
+| `SSH_ALLOWED_PRIVATE_CIDRS` | Unset; private networks the API may SSH into (comma-separated). On Google Cloud, Terraform sets it from the cluster's subnet plus `ssh_allowed_private_cidrs` | No |
+| `AZAD_SELF_HOST_ENV` | `production`; Cloudflare installer label (lowercase, up to 32 characters) | No |
+| `AZAD_SELF_HOST_PLACEMENT_REGION` | Unset; Cloudflare placement hint, not data residency | No |
+
+Managed project source on Cloudflare (Cloudflare Artifacts) needs
+`CLOUDFLARE_ARTIFACTS_API_TOKEN` (Artifacts Read and Edit) and
+`CLOUDFLARE_ARTIFACTS_EVENTS_API_TOKEN` (event subscriptions). Setup then adds
+`V3_CF_ACCOUNT_ID`, a namespace of this installation's own
+(`V3_CF_ARTIFACTS_NAMESPACE`, unless you set one) and, without
+`V3_CONTROL_BACKUP_GITHUB_REPO` (a private `owner/repository` your App can
+reach), `V3_CONTROL_BACKUP=none`. `V3_CONTROL_VALIDATION_GITHUB_REPO` and
+`V3_CONTROL_VALIDATION_PROJECT_ID` go together. Never copy another
+installation's `V3_CF_ARTIFACTS_EVENT_QUEUE_ID`: the deploy derives it.
+
+The `azad` CLI keeps its own answers in the same file as `AZAD_CLI_*` keys.
+Changing them doesn't redeploy.
+
+## `terraform.tfvars.json`
+
+Setup writes it once from your flags and refuses to overwrite it. To change a
+setting later, edit the file, then `plan` and `apply`. `refresh` changes only
+`deployment.revision`.
+
+### `postgres` and `cloudsql`
+
+| Field | Required? | What it's for | Default or example |
+| --- | --- | --- | --- |
+| `cloudflare.account_id` | Yes (setup) | Your Cloudflare account: the token's only one, or `--account-id` | 32 hex characters |
+| `cloudflare.web_origin`, `cloudflare.api_origin` | Yes (setup) | `https://<web-host>` and `https://api.<web-host>`. The API origin also fixes every resource name, so change it only before the first apply | `https://board.example.com` |
+| `deployment.revision` | Yes (setup) | The app commit to deploy: the checkout's `HEAD` | 40 hex characters |
+| `deployment.env_file`, `deployment.state_directory` | Yes (setup) | Absolute paths of the `.env` and `installer-state/` in the instance. The drivers refuse relative paths and paths inside this repository | |
+| `deployment.enabled` | No | `false` keeps the infrastructure and uninstalls the app | `true` |
+| `host_zones` | No (setup) | Zone ID of each hostname; Terraform reserves both from zone-wide Workers routes | `{}` reserves nothing |
+| `clerk_dns` | No (setup) | Clerk's production CNAMEs that DNS still lacks | `null` |
+| `storage` | No (setup, from `STORAGE_*`) | Your own bucket instead of R2: `adapter` (`s3` or `gcs`), `bucket`, and optionally `releases_bucket`, `endpoint`, `region` | `{"adapter": "r2"}` |
+| `github_app_pending` | No (setup, from `AZAD_SELF_HOST_GITHUB_APP_PENDING`) | Deploy before the GitHub App exists | `false` |
+| `database_ca` | No, `postgres` only (setup, from `AZAD_SELF_HOST_DATABASE_CA`) | Register Neon's public CA in Cloudflare | `null` |
+| `gcp.project_id` | `cloudsql` (setup, from `--project-id`) | Your Google Cloud project | `my-project` |
+| `gcp.authorized_networks` | `cloudsql` (setup) | Cloudflare's published IPv4 ranges and your apply machine's IPv4 (`--runner-cidr` overrides it). A snapshot: review it | `{"runner": "198.51.100.10/32", …}` |
+| `gcp.region` | No, `cloudsql` | Where Cloud SQL lives. **Setup doesn't write it**: add it before the first apply | `me-central2` |
+| `gcp.tier`, `gcp.availability_type`, `gcp.disk_size_gb` | No, `cloudsql` | Size of the database | `db-custom-2-7680`, `ZONAL`, `20` |
+| `gcp.deletion_protection` | No, `cloudsql` | Stops Terraform from deleting the database | `true` |
+| `gcp.database_name`, `gcp.username`, `gcp.instance_name`, `gcp.labels` | No, `cloudsql` | Names and labels; the instance is `azad-<hash of the API origin>` unless named | `azad`, `azad` |
+
+Cloud SQL always runs PostgreSQL 17 on SSD with a growing disk, backups and
+point-in-time recovery, and accepts only encrypted connections.
+
+### `gcp-celld`
+
+| Field | Required? | What it's for | Default or example |
+| --- | --- | --- | --- |
+| `project_id`, `region` | Yes (setup) | Your Google Cloud project and region | `my-project`, `europe-west1` |
+| `web_host` | Yes (setup) | The browser hostname; the API is `api.<web_host>` and Mini Apps `<app>.apps.<web_host>` | `azad.example.com` |
+| `name` | Yes (setup) | Prefix of every Google resource, derived from the hostname | `azad-azad-1a2b` |
+| `cloudflare_zone_id` | Yes (setup) | The Cloudflare zone of the hostnames | 32 hex characters |
+| `deployment` | Yes (setup) | `revision`, `env_file` and `state_directory` (`celld-install/` in the instance) | |
+| `deletion_protection` | No | Protects the cluster, database and agent machine. `false` also lets destroy delete the fleet bucket and the disk backups | `true` (`false` with `--evaluation`) |
+| `spot` | No | Spot nodes: cheaper, preemptible | `false` (`true` with `--evaluation`) |
+| `database` | No | `tier`, `disk_size_gb`, `backups`, `flags` | `db-custom-1-3840`, 10 GB, backups on |
+| `api_replicas` | No | API fleet nodes | `2` |
+| `disk_backups` | No (setup, `--disk-backups`) | Backup for GKE `schedule` (`hourly`, `daily`, `weekly`, `off`) and `retain_days` | `daily`, 7 days |
+| `agent_machine` | No (setup, `--agent-machine`) | `machine_type`, `label` and `disk_size_gb` of a VM for agents | none |
+| `clerk_dns` | No (setup) | Clerk's production CNAMEs that DNS still lacks | `null` |
+| `clerk_application` | No (setup) | The Clerk application an evaluation install deletes on destroy | `null` |
+| `cloudflare_proxy`, `manage_ssl_rule` | No | Proxy the hostnames through Cloudflare with an Origin CA certificate | `false`, `true` |
+| `proxy_only_subnet_range` | No | The load balancer's proxy-only subnet; `null` to share the region's existing one | `10.127.0.0/23` |
+| `ready_timeout_minutes` | No | How long DNS and deploys wait for the load balancer and the new revision | `45` |
+| `ssh_allowed_private_cidrs` | No | More private networks the API may SSH into | `[]` |
+
+[docs/google-cloud.md](docs/google-cloud.md) explains these in context.
+
+## The Cloudflare API token
+
+Cloudflare's dashboard calls the API's "Write" permissions "Edit".
+
+- **Azad on Cloudflare:** Account: Account Settings Read, Workers Scripts
+  Edit, Workers R2 Storage Edit, Queues Edit, Hyperdrive Edit and Cloudflare
+  Pages Edit. Zone (the zones of your hostnames): Zone Read, DNS Edit and
+  Workers Routes Edit. With `sslmode=verify-full`, also Account: SSL and
+  Certificates Read for an existing CA ID, or Edit for
+  `AZAD_SELF_HOST_DATABASE_CA=neon-isrg-root-x1`.
+- **Azad on Google Cloud:** Zone: Zone Read, DNS Edit, SSL and Certificates
+  Edit and Config Settings Edit. The last two are used only with
+  `cloudflare_proxy`.
+
+[docs/token-bootstrap.md](docs/token-bootstrap.md) mints exactly these from a
+token that can create tokens.
+
+## Google Cloud permissions
+
+- **`cloudsql`:** Cloud SQL Admin and Service Usage Admin in the project
+  (`roles/cloudsql.admin`, `roles/serviceusage.serviceUsageAdmin`). A user
+  ADC's quota project also needs `serviceusage.services.use` (Service Usage
+  Consumer).
+- **`gcp-celld`:** Owner, or Editor plus Project IAM Admin. Terraform turns on
+  the Google APIs it uses (Compute, GKE, Cloud Storage, Cloud SQL Admin,
+  Certificate Manager, Backup for GKE).
+
+## Generated for you
+
+You never type these. Back them up with the instance directory.
+
+| What | Where it's kept |
 | --- | --- |
-| `CLOUDFLARE_ARTIFACTS_API_TOKEN` | Customer account credential with Artifacts Read/Edit |
-| `V3_CF_ARTIFACTS_NAMESPACE` | Existing namespace chosen/created by the customer with its intended residency |
-| `CLOUDFLARE_ARTIFACTS_EVENTS_API_TOKEN` | Customer account credential permitting event subscription management |
-| `V3_CONTROL_BACKUP_GITHUB_REPO` | Existing private `owner/repository`, installed for the customer's GitHub App |
-| `V3_CF_ACCOUNT_ID` | Derived by setup, shared with the selected Cloudflare account |
-| `V3_CF_ARTIFACTS_EVENT_QUEUE_ID` | Derived by the installer from its consumed queue. A supplied different ID is rejected. |
-| `V3_CONTROL_VALIDATION_GITHUB_REPO`, `V3_CONTROL_VALIDATION_PROJECT_ID` | Optional pair for a trusted operator project's validation workflow; no arbitrary customer project gains operator CI authority |
+| Cloud SQL password | Terraform state. On `cloudsql`, `TF_VAR_database_password` can replace it |
+| Forgejo service password, agent machine SSH keys, Origin CA key (`gcp-celld`) | Terraform state |
+| `GITHUB_WEBHOOK_SECRET` when you supply none | Cloudflare: the `.env`. Google Cloud: `celld-install/secrets.json` |
+| The app's own secrets (`REALTIME_UPGRADE_SECRET`, `MEDIA_CAPABILITY_SECRET`, `INTERNAL_API_SECRET`, `AGENT_TASK_SECRET_CIPHER_KEY`, `VAPID_PRIVATE_JWK`, `MINIAPP_TOKEN_PRIVATE_JWK`, the release signing key) | `installer-state/` (Cloudflare) or `celld-install/` (Google Cloud). They decrypt the data in your database: never delete them to retry a deploy |
 
-Incomplete managed configuration is rejected before deployment. These settings now
-reach Worker secrets. The application creates project repositories and their push
-subscriptions at runtime. Terraform does not create a second owner for those.
-Without the settings, setup explicitly reports managed source as unconfigured.
-Mini Apps still require their runtime token; disabling them is a reduced-feature
-install, not full product acceptance. Agent/model setup, invitations, repository
-attachment and external webhook delivery must be exercised during live acceptance.
-The retired fallback-Admin keys and unsupported `SENTRY_AGENT_TRACES_SAMPLE_RATE`
-are not customer setup inputs.
+Terraform state and saved plans are sensitive. Cloud SQL's DSN and password
+are in both; an existing database's `DATABASE_URL` is only in saved plans,
+because a plan records its variables.
+
+## Outside Terraform
+
+A few things only you can do:
+
+- Billing and quota in your accounts. For Azad on Cloudflare, Workers Paid
+  with R2, Queues, Hyperdrive, Pages, Durable Objects and Worker Loaders (and
+  D1 for Mini Apps).
+- Your domain's zone in your Cloudflare account.
+- The Clerk application and GitHub App: production domain, allowed origins,
+  OAuth callbacks, webhooks, the App's permissions and installation. The
+  [self-hosting guide](https://github.com/kodu-ai/azad-ide-web/blob/main/docs/self-hosting.md#clerk-application)
+  has the details. The URLs, with `api.<web-host>` as the API:
+  - Clerk webhook: `https://api.<web-host>/api/clerk/webhooks`
+  - GitHub App callback URL and setup URL: `https://api.<web-host>/api/github/install/callback`
+  - GitHub App webhook: `https://api.<web-host>/api/github/webhooks`
+- After the deploy: sign in, pair an agent machine and set up a model
+  provider in a project.

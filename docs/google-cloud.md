@@ -4,7 +4,7 @@ The `gcp-celld` root runs Azad in your Google Cloud project on GKE Autopilot,
 with no Cloudflare runtime; Cloudflare only serves DNS for your domain.
 `scripts/gcp.ts` drives it. One apply creates the infrastructure and then runs
 the Azad source checkout's `scripts/self-host/celld-install.ts` to deploy the
-app (see the [README](../README.md)).
+app (see [how-it-works.md](how-it-works.md)).
 
 ## What gets created
 
@@ -35,8 +35,9 @@ Cloud SQL and Certificate Manager APIs it needs.
 - The domain's zone in your Cloudflare account, and a Cloudflare token with
   Zone Read, DNS Write, SSL and Certificates Write and Config Settings Write on
   that zone ([docs/token-bootstrap.md](token-bootstrap.md) can mint it).
-- Terraform 1.13.4+, Bun 1.4.4+, the gcloud CLI, and Application Default
-  Credentials: `gcloud auth application-default login`.
+- Terraform 1.13.4+, Bun 1.4.4+, and the gcloud CLI signed in twice:
+  `gcloud auth application-default login` for Terraform and the deploy, and
+  `gcloud auth login`, which destroy uses.
 - An Azad source checkout with its dependencies installed (`--source` or
   `AZAD_SOURCE`).
 
@@ -78,8 +79,9 @@ bun --no-env-file scripts/gcp.ts apply --instance-dir "$instance" terraform.tfpl
 - `setup` asks the app to validate the credential file, reads the zone and
   Clerk's DNS targets, then writes
   `<instance>/terraform/gcp-celld/terraform.tfvars.json` once. The credentials
-  stay in the `.env`; the deploy reads it directly, so no secret enters
-  Terraform state.
+  stay in the `.env`; the deploy reads it directly, so none of them enters
+  Terraform state. The secrets Terraform generates (the database and Forgejo
+  passwords, the agent machine's keys) do.
 - Before the cluster exists, `plan` covers only the cluster and Clerk's DNS
   records (`gcp.ts phase` prints `cluster`), because the Kubernetes resources
   are planned against the cluster. Once it exists (`phase` prints `full`), the
@@ -157,9 +159,14 @@ bun --no-env-file scripts/gcp.ts destroy --instance-dir "$instance"
 ```
 
 - **Evaluation installs** are removed completely, including the Clerk
-  application the installer created.
-- **Production installs** keep deletion protection on: set
-  `deletion_protection = false` in the variables and apply before destroying.
+  application the `azad` CLI created (destroy deletes it with
+  `npx clerk@4.0.0`, so it needs Node and your Clerk CLI login).
+- **Production installs** keep deletion protection on. It protects the
+  cluster, the database and the agent machine only: a destroy with it on
+  removes everything else first, the Forgejo repositories' disk included,
+  then stops with an error. To remove everything, set
+  `deletion_protection = false` in the variables and apply before destroying;
+  that also deletes the fleet bucket and the disk backups.
 - Destroy waits, using `gcloud`, until Kubernetes has deleted the cluster's
   disks. A destroy that stopped after the cluster was gone finishes what is
   left on the next run.

@@ -51,7 +51,7 @@ real instance directory.
   `terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_amd64 -platform=darwin_arm64`
   in that directory.
 - **The app contract.** The entrypoints this repository runs, and how, are
-  listed in the [README](README.md#how-it-fits-together). Changing that
+  listed in [docs/how-it-works.md](docs/how-it-works.md#the-app-contract). Changing that
   contract needs a matching change in the app repository and a minor (0.x) or
   major version.
 

@@ -11,7 +11,7 @@ Queues, Hyperdrive) in your Cloudflare account:
 
 `scripts/cloudflare.ts` drives both. One apply provisions the fixed
 infrastructure and then hands the app deployment to the Azad source checkout's
-`scripts/self-host/cloudflare-install.ts` (see the [README](../README.md)).
+`scripts/self-host/cloudflare-install.ts` (see [how-it-works.md](how-it-works.md)).
 
 ## Account ownership and location
 
@@ -207,7 +207,11 @@ account are untouched. It keeps your database, your own bucket, the Clerk
 application and the installer state: those keys still decrypt the data in
 your database, so a later apply reinstalls over it. Setting
 `deployment.enabled = false` on a running instance also uninstalls it.
-Cloud SQL deletion protection needs an explicit change before destroy.
+
+On the `cloudsql` root, Cloud SQL's deletion protection is on by default. A
+destroy then uninstalls everything above and stops with an error at the
+database, which it keeps. To delete the database too, set
+`gcp.deletion_protection` to `false`, apply, then destroy.
 
 ## Decisions and limits
 
