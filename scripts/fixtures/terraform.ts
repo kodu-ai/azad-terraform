@@ -2,8 +2,10 @@
  * A `terraform` on PATH for driver tests that read states. `state pull`
  * answers, in turn, the states queued for the configuration it runs in:
  * `bucket-state` (the drivers' bucket configuration) or `root` (any other);
- * the last one keeps answering, and none answers with nothing. Every other
- * command is recorded with its working data and the R2 key it got.
+ * the last one keeps answering, and none answers with nothing. A `state
+ * push` replaces that configuration's answers with the pushed state. Every
+ * command but `state pull` and `version` is recorded with its working data
+ * and the R2 key it got.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -26,6 +28,15 @@ if (args[1] === "state" && args[2] === "pull") {
   if (states.length > 1) writeFileSync(path, JSON.stringify(states.slice(1)))
   process.exit(0)
 }
+if (args[1] === "state" && args[2] === "push") {
+  const name = args[0].endsWith("bucket-state") ? "bucket-state" : "root"
+  const pushed = args.at(-1) ?? ""
+  if (existsSync(pushed)) writeFileSync(${JSON.stringify(directory)} + "/" + name + ".states.json", JSON.stringify([JSON.parse(readFileSync(pushed, "utf8"))]))
+}
+if (args[1] === "version") {
+  process.stdout.write(JSON.stringify({ terraform_version: "1.17.1" }))
+  process.exit(0)
+}
 appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR, r2Key: process.env.AWS_ACCESS_KEY_ID ?? null }) + "\\n")
 `,
     { mode: 0o755 }
@@ -34,6 +45,11 @@ appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.
     path: `${bin}:${process.env.PATH}`,
     answer(name: "bucket-state" | "root", ...states: object[]) {
       writeFileSync(queue(name), JSON.stringify(states))
+    },
+    /** The state `name` answers now. */
+    current(name: "bucket-state" | "root") {
+      const states = JSON.parse(readFileSync(queue(name), "utf8"))
+      return states[0]
     },
     calls(): { args: string[]; data: string; r2Key: string | null }[] {
       return existsSync(log)

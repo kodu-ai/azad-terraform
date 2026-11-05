@@ -163,6 +163,20 @@ const pointerSchema = z.object({
   digest: z.string(),
   at: z.string(),
   by: z.string(),
+  /**
+   * Set while a command that changes the state runs: who runs it (the
+   * machine and the instance directory) and its operation. A run that never
+   * recorded its result leaves it set.
+   */
+  writer: z
+    .object({
+      by: z.string(),
+      directory: z.string(),
+      operation: z.string(),
+      at: z.string(),
+    })
+    .nullable()
+    .default(null),
 })
 export type StatePointer = z.infer<typeof pointerSchema>
 
@@ -216,55 +230,62 @@ function canonical(value: unknown): unknown {
   return value
 }
 
-const instanceSchema = z.looseObject({
-  index_key: z.unknown().optional(),
-  attributes: z.unknown().optional(),
-})
+/**
+ * Instance fields that record no infrastructure: Terraform versions add or
+ * encode them differently, and a migration may rewrite them.
+ */
+const BOOKKEEPING = new Set([
+  "sensitive_attributes",
+  "identity",
+  "identity_schema_version",
+])
+
 const resourceSchema = z.looseObject({
-  module: z.string().optional(),
-  mode: z.string().optional(),
-  type: z.string().optional(),
-  name: z.string().optional(),
-  instances: z.array(instanceSchema).default([]),
+  instances: z.array(z.record(z.string(), z.unknown())).default([]),
 })
 
 /**
- * The digest of what a state records: each resource instance's address and
- * attributes, and each output's value. Bookkeeping that Terraform versions
- * add or format differently (lineage, serial, sensitivity paths, identity
- * schema versions) is left out, so the same state digests alike after an
- * upgrade or a migration.
+ * The digest of what a state records: every resource with its provider
+ * binding, and every instance with its status, deposed key, attributes,
+ * private data and dependencies; and every output. Only bookkeeping that
+ * Terraform versions encode differently (lineage, serial, sensitivity paths,
+ * resource identities) is left out, so the same state digests alike after an
+ * upgrade or a migration, and a tainted or deposed instance does not.
  */
 export function digestOf(state?: State): string {
   const resources = (state?.resources ?? [])
     .map((resource) => resourceSchema.parse(resource))
-    .map((resource) => ({
-      address: [resource.module, resource.mode, resource.type, resource.name]
-        .map((part) => part ?? "")
-        .join("|"),
-      instances: resource.instances
-        .map((instance) => ({
-          key: JSON.stringify(instance.index_key ?? null),
-          attributes: canonical(instance.attributes ?? null),
-        }))
-        .sort((a, b) => a.key.localeCompare(b.key)),
+    .map(({ instances, ...resource }) => ({
+      resource: JSON.stringify(canonical(resource)),
+      instances: instances
+        .map((instance) =>
+          JSON.stringify(
+            canonical(
+              Object.fromEntries(
+                Object.entries(instance).filter(
+                  ([key]) => !BOOKKEEPING.has(key)
+                )
+              )
+            )
+          )
+        )
+        .sort(),
     }))
-    .sort((a, b) => a.address.localeCompare(b.address))
-  const outputs = Object.fromEntries(
-    Object.entries(state?.outputs ?? {}).map(([name, output]) => [
-      name,
-      canonical(
-        z.looseObject({ value: z.unknown() }).safeParse(output).data?.value ??
-          null
-      ),
-    ])
-  )
+    .sort((a, b) => a.resource.localeCompare(b.resource))
   return createHash("sha256")
-    .update(JSON.stringify(canonical({ resources, outputs })))
+    .update(
+      JSON.stringify({ resources, outputs: canonical(state?.outputs ?? {}) })
+    )
     .digest("hex")
 }
 /** The digest of a state without resources or outputs. */
 const EMPTY = digestOf()
+
+/** This machine and instance directory, as a pointer's writer names them. */
+const writerHere = (files: InstanceTerraform) => ({
+  by: hostname(),
+  directory: files.directory,
+})
 
 /**
  * Whether a backend holds the installation's current state, as the pointer
@@ -272,10 +293,31 @@ const EMPTY = digestOf()
  * with the same contents; or, with another lineage (a migrated copy may get
  * a new one), exactly the recorded contents. An empty recorded state
  * matches by lineage only, so any other empty backend does not.
+ *
+ * While a writer is set, the state may have moved on without the pointer,
+ * so only that writer (or a run taking over its operation) may use the
+ * backend it wrote, at the recorded serial or later.
  */
-function holdsCurrent(pointer: StatePointer, own: BackendState): boolean {
+function holdsCurrent(
+  pointer: StatePointer,
+  own: BackendState,
+  files: InstanceTerraform,
+  takeOver?: string
+): boolean {
   if (!own.state) return false
   const serial = serialOf(own.state)
+  if (pointer.writer) {
+    const here = writerHere(files)
+    const theirs =
+      (pointer.writer.by === here.by &&
+        pointer.writer.directory === here.directory) ||
+      takeOver === pointer.writer.operation
+    return (
+      theirs &&
+      own.state.lineage === pointer.lineage &&
+      serial >= pointer.serial
+    )
+  }
   const same = digestOf(own.state) === pointer.digest
   if (own.state.lineage === pointer.lineage)
     return serial > pointer.serial || (serial === pointer.serial && same)
@@ -315,7 +357,9 @@ export function assertStateHere(
 export type Runs = { bucket: TerraformRun; own: TerraformRun }
 
 const notCurrent = (file: string, pointer: StatePointer) =>
-  `The backend in ${file} does not hold this installation's current Terraform state (lineage ${pointer.lineage}, serial ${pointer.serial}, written ${pointer.at} from ${pointer.by}): it is empty, older or another installation's. Point the file at the backend that holds the current state, or move that state there with init -migrate-state.`
+  pointer.writer
+    ? `A run of operation ${pointer.writer.operation} (${pointer.writer.by}, ${pointer.writer.directory}, ${pointer.writer.at}) changed this installation's Terraform state and did not record the result. Run init where it ran. Once you have confirmed it stopped, you can also pass --take-over ${pointer.writer.operation} here.`
+    : `The backend in ${file} does not hold this installation's current Terraform state (lineage ${pointer.lineage}, serial ${pointer.serial}, written ${pointer.at} from ${pointer.by}): it is empty, older or another installation's. Point the file at the backend that holds the current state, or move that state there with init -migrate-state.`
 
 /**
  * Refuses a command in the installation's own backend unless `init`
@@ -327,7 +371,8 @@ export function assertOwnCurrent(
   files: InstanceTerraform,
   own: OwnBackend,
   runs: Runs,
-  init: string
+  init: string,
+  takeOver?: string
 ): void {
   const file = ownBackendFile(files)
   const bucketData = join(bucketConfiguration(files).data, "terraform.tfstate")
@@ -346,7 +391,9 @@ export function assertOwnCurrent(
   if (
     !holdsCurrent(
       bucket.pointer,
-      readBackendState(runs.own, `the backend in ${file}`)
+      readBackendState(runs.own, `the backend in ${file}`),
+      files,
+      takeOver
     )
   )
     throw new InstanceError(notCurrent(file, bucket.pointer))
@@ -372,7 +419,7 @@ export type Reconciled =
 export function reconcileOwnBackend(
   files: InstanceTerraform,
   runs: Runs,
-  options: { write: boolean; now?: Date }
+  options: { write: boolean; now?: Date; takeOver?: string }
 ): Reconciled {
   const file = ownBackendFile(files)
   const backend = declaredBackend(files)
@@ -385,41 +432,8 @@ export function reconcileOwnBackend(
   if (own.kind === "pointer") throw new InstanceError(aliased)
   const readOwn = () => readBackendState(runs.own, `the backend in ${file}`)
 
-  /** Records the own backend's state, as it is now, in the bucket's pointer. */
   const pointAt = (state: State) => {
-    const pointer: StatePointer = {
-      backend,
-      lineage: state.lineage,
-      serial: serialOf(state),
-      digest: digestOf(state),
-      at: now.toISOString(),
-      by: hostname(),
-    }
-    const previous = bucket.state
-    const next = {
-      version: 4,
-      terraform_version:
-        previous?.terraform_version ?? terraformVersion(runs.own),
-      serial: serialOf(previous) + 1,
-      lineage: previous?.lineage || randomUUID(),
-      outputs: {
-        [POINTER_OUTPUT]: { value: JSON.stringify(pointer), type: "string" },
-      },
-      resources: [],
-      check_results: null,
-    }
-    // -force over a bucket without a state: it may answer with an empty
-    // one of another lineage. A state or an earlier pointer keeps its own.
-    push(runs.bucket, files, next, "the state bucket", bucket.kind === "none")
-    const written = readBackendState(runs.bucket, "the state bucket")
-    if (
-      written.kind !== "pointer" ||
-      written.pointer.digest !== pointer.digest ||
-      written.pointer.serial !== pointer.serial
-    )
-      throw new InstanceError(
-        "The state bucket did not keep the pointer to this installation's own backend. Inspect it before you retry."
-      )
+    writePointer(files, runs, bucket, snapshot(backend, state, now, null))
     if (readOwn().kind === "pointer") throw new InstanceError(aliased)
   }
   /** After a write to the own backend: the bucket must not have changed with it. */
@@ -435,9 +449,10 @@ export function reconcileOwnBackend(
         `${files.state} holds a local state from a release before 0.1.0, but this installation's state already lives in its own backend. Check which one is current, then move the other out of the way.`
       )
     const { pointer } = bucket
-    if (!own.state || !holdsCurrent(pointer, own))
+    if (!own.state || !holdsCurrent(pointer, own, files, options.takeOver))
       throw new InstanceError(notCurrent(file, pointer))
     const unchanged =
+      !pointer.writer &&
       own.state.lineage === pointer.lineage &&
       serialOf(own.state) === pointer.serial &&
       digestOf(own.state) === pointer.digest
@@ -532,20 +547,112 @@ export function reconcileOwnBackend(
   return { action, kept }
 }
 
-/**
- * After a command that may have changed the own backend's state, whether or
- * not it succeeded (a failed apply keeps what it created): records the
- * state as it is now in the bucket's pointer. Run it inside the operation
- * record that command held. A failure only leaves the pointer as it was.
- */
-export function recordOwnState(files: InstanceTerraform, runs: Runs): void {
-  try {
-    reconcileOwnBackend(files, runs, { write: true })
-  } catch (error) {
-    process.stderr.write(
-      `The state bucket's pointer was not updated: ${error instanceof Error ? error.message : String(error)}\n`
-    )
+/** A pointer recording `state` as the installation's current state. */
+function snapshot(
+  backend: string,
+  state: State,
+  now: Date,
+  writer: StatePointer["writer"]
+): StatePointer {
+  return {
+    backend,
+    lineage: state.lineage,
+    serial: serialOf(state),
+    digest: digestOf(state),
+    at: now.toISOString(),
+    by: hostname(),
+    writer,
   }
+}
+
+/** Replaces the bucket's state (`previous`, as read) with `pointer`, and checks it was kept. */
+function writePointer(
+  files: InstanceTerraform,
+  runs: Runs,
+  previous: BackendState,
+  pointer: StatePointer
+) {
+  const next = {
+    version: 4,
+    terraform_version:
+      previous.state?.terraform_version ?? terraformVersion(runs.own),
+    serial: serialOf(previous.state) + 1,
+    lineage: previous.state?.lineage || randomUUID(),
+    outputs: {
+      [POINTER_OUTPUT]: { value: JSON.stringify(pointer), type: "string" },
+    },
+    resources: [],
+    check_results: null,
+  }
+  // -force over a bucket without a state: it may answer with an empty one
+  // of another lineage. A state or an earlier pointer keeps its own.
+  push(runs.bucket, files, next, "the state bucket", previous.kind === "none")
+  const written = readBackendState(runs.bucket, "the state bucket")
+  if (
+    written.kind !== "pointer" ||
+    JSON.stringify(written.pointer) !== JSON.stringify(pointer)
+  )
+    throw new InstanceError(
+      "The state bucket did not keep the pointer to this installation's own backend. Inspect it before you retry."
+    )
+}
+
+/**
+ * Before a command that changes the own backend's state, inside the
+ * operation record and after {@link assertOwnCurrent}: records its state as
+ * current, with this run as the writer, so no other copy is used until
+ * {@link finishOwnWrite} records the result.
+ */
+export function beginOwnWrite(
+  files: InstanceTerraform,
+  runs: Runs,
+  operation: string
+): void {
+  const now = new Date()
+  const bucket = readBackendState(runs.bucket, "the state bucket")
+  const own = readBackendState(
+    runs.own,
+    `the backend in ${ownBackendFile(files)}`
+  )
+  if (bucket.kind !== "pointer" || !own.state)
+    throw new InstanceError(
+      "The state bucket's pointer changed before this command started. Retry it."
+    )
+  writePointer(
+    files,
+    runs,
+    bucket,
+    snapshot(bucket.pointer.backend, own.state, now, {
+      ...writerHere(files),
+      operation,
+      at: now.toISOString(),
+    })
+  )
+}
+
+/**
+ * After that command, whether or not it succeeded (a failed apply keeps
+ * what it created): records the backend's state as it is now, the
+ * successor of the one {@link beginOwnWrite} recorded, and clears the
+ * writer. A failure throws, so the command does not finish; the writer
+ * stays, and the next init here records the result.
+ */
+export function finishOwnWrite(files: InstanceTerraform, runs: Runs): void {
+  const bucket = readBackendState(runs.bucket, "the state bucket")
+  const own = readBackendState(
+    runs.own,
+    `the backend in ${ownBackendFile(files)}`
+  )
+  if (bucket.kind !== "pointer" || !own.state)
+    throw new InstanceError(
+      `This installation's state bucket or its own backend could not be read after the command, so its result is not recorded. Run init here to record it.`
+    )
+  writePointer(
+    files,
+    runs,
+    bucket,
+    snapshot(bucket.pointer.backend, own.state, new Date(), null)
+  )
 }
 
 /** Writes `state` with `terraform state push` through a private file that is removed afterwards. */
@@ -606,15 +713,16 @@ export function initOwnBackend(options: {
   if (status !== 0) return status
   status = runs.own(["init", ...options.forwarded]).status
   if (status !== 0) return status
-  if (reconcileOwnBackend(files, runs, { write: false }).action === "none")
-    return 0
+  const reconcile = (write: boolean) =>
+    reconcileOwnBackend(files, runs, { write, takeOver: options.takeOver })
+  if (reconcile(false).action === "none") return 0
   let done = { action: "none" } as Reconciled
   status = withOperation(
     options.store,
     "terraform-state-move",
     { takeOver: options.takeOver },
     () => {
-      done = reconcileOwnBackend(files, runs, { write: true })
+      done = reconcile(true)
       return 0
     }
   )

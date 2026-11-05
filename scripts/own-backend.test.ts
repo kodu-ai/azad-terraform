@@ -20,7 +20,8 @@ import {
   ownBackendFile,
   POINTER_OUTPUT,
   reconcileOwnBackend,
-  recordOwnState,
+  beginOwnWrite,
+  finishOwnWrite,
   type OwnBackend,
   type Runs,
 } from "./own-backend"
@@ -107,7 +108,7 @@ test("the digest covers resources and outputs, not the bookkeeping Terraform ver
       })
     )
   const base = digestOf(
-    state({ attributes: { id: "x", tags: { b: 1, a: 2 } } })
+    state({ schema_version: 0, attributes: { id: "x", tags: { b: 1, a: 2 } } })
   )
   expect(
     digestOf(
@@ -123,6 +124,24 @@ test("the digest covers resources and outputs, not the bookkeeping Terraform ver
     )
   ).toBe(base)
   expect(digestOf(state({ attributes: { id: "y" } }))).not.toBe(base)
+  // What changes a plan changes the digest: a taint, a deposed object,
+  // the provider an instance belongs to, provider-private data.
+  const attributes = { id: "x", tags: { b: 1, a: 2 } }
+  for (const instance of [
+    { schema_version: 0, attributes, status: "tainted" },
+    { schema_version: 0, attributes, deposed: "00000001" },
+    {
+      schema_version: 0,
+      attributes,
+      private: "eyJzY2hlbWFfdmVyc2lvbiI6IjEifQ==",
+    },
+    { schema_version: 0, attributes, dependencies: ["terraform_data.other"] },
+  ])
+    expect(digestOf(state(instance))).not.toBe(base)
+  const other = state({ schema_version: 0, attributes })
+  other.resources[0].provider =
+    'provider["registry.terraform.io/hashicorp/other"]'
+  expect(digestOf(other)).not.toBe(base)
   expect(digestOf()).not.toBe(base)
 })
 
@@ -212,19 +231,27 @@ function real(bucketState?: object) {
   if (bucketState) writeFileSync(bucketPath, JSON.stringify(bucketState))
   const bucket = localBackend(directory, "bucket", bucketPath)
   expect(bucket.init()).toBe(0)
-  // What init leaves in the drivers' bucket-state configuration.
-  const bucketData = join(files.directory, "bucket-state", ".terraform")
-  mkdirSync(bucketData, { recursive: true })
-  writeFileSync(join(bucketData, "terraform.tfstate"), "{}")
+  const machines = new Map([["own", files]])
+  /**
+   * The own backend at `path` as machine `name` uses it: its own instance
+   * directory (the first machine's is `files`), with what init leaves in
+   * the drivers' bucket-state configuration.
+   */
   const own = (path: string, name = "own") => {
+    const at = machines.get(name) ?? instance()
+    machines.set(name, at)
+    const bucketData = join(at.directory, "bucket-state", ".terraform")
+    mkdirSync(bucketData, { recursive: true })
+    writeFileSync(join(bucketData, "terraform.tfstate"), "{}")
     writeFileSync(
-      ownBackendFile(files),
+      ownBackendFile(at),
       `terraform {\n  backend "local" {\n    path = ${JSON.stringify(path)}\n  }\n}\n`
     )
     const backend = localBackend(directory, name, path)
     expect(backend.init()).toBe(0)
     return {
       ...backend,
+      files: at,
       runs: { bucket: bucket.run, own: backend.run } as Runs,
     }
   }
@@ -234,32 +261,42 @@ function real(bucketState?: object) {
 }
 const pointerIn = (state: { outputs: Record<string, { value: string }> }) =>
   JSON.parse(state.outputs[POINTER_OUTPUT].value)
-const reconcile = (files: InstanceTerraform, own: { runs: Runs }) =>
-  reconcileOwnBackend(files, own.runs, { write: true })
-const current =
-  (files: InstanceTerraform, own: { where: OwnBackend; runs: Runs }) => () =>
-    assertOwnCurrent(files, own.where, own.runs, "init")
-/** An apply on `own`: the next serial, with another output. */
-function apply(
+type Machine = {
+  files: InstanceTerraform
+  where: OwnBackend
+  run: TerraformRun
+  runs: Runs
+}
+const reconcile = (own: Machine, takeOver?: string) =>
+  reconcileOwnBackend(own.files, own.runs, { write: true, takeOver })
+const current = (own: Machine, takeOver?: string) => () =>
+  assertOwnCurrent(own.files, own.where, own.runs, "init", takeOver)
+/** A command that writes `next(state)` to `own`, as the drivers run one. */
+function write(
   t: ReturnType<typeof real>,
-  own: { run: TerraformRun; runs: Runs },
-  value: number
+  own: Machine,
+  next: (state: Record<string, unknown> & { serial: number }) => object,
+  runs: Runs = own.runs
 ) {
+  beginOwnWrite(own.files, runs, "operation-1")
   const pulled = JSON.parse(
     own.run(["state", "pull"], { capture: true }).stdout
   )
-  const path = join(t.directory, `apply-${value}.tfstate`)
-  writeFileSync(
-    path,
-    JSON.stringify({
-      ...pulled,
-      serial: pulled.serial + 1,
-      outputs: { ...pulled.outputs, version: { value, type: "number" } },
-    })
-  )
+  const path = join(t.directory, `write-${pulled.serial}.tfstate`)
+  writeFileSync(path, JSON.stringify(next(pulled)))
   expect(own.run(["state", "push", path]).status).toBe(0)
-  recordOwnState(t.files, own.runs)
+  finishOwnWrite(own.files, runs)
 }
+/** An apply on `own`: the next serial, with another output. */
+const apply = (t: ReturnType<typeof real>, own: Machine, value: number) =>
+  write(t, own, (state) => ({
+    ...state,
+    serial: state.serial + 1,
+    outputs: {
+      ...(state.outputs as object),
+      version: { value, type: "number" },
+    },
+  }))
 
 test.skipIf(!terraformBinary)(
   "init moves the bucket's state into an empty own backend, then leaves only a pointer to it",
@@ -271,7 +308,7 @@ test.skipIf(!terraformBinary)(
       reconcileOwnBackend(t.files, own.runs, { write: false }).action
     ).toBe("move")
     expect(existsSync(ownPath)).toBe(false)
-    const done = reconcile(t.files, own)
+    const done = reconcile(own)
     expect(done.action).toBe("move")
     expect(t.read(ownPath).resources).toEqual(liveState(LINEAGE).resources)
     const kept = done.action === "none" ? "" : (done.kept[0] ?? "")
@@ -286,8 +323,8 @@ test.skipIf(!terraformBinary)(
       serial: t.read(ownPath).serial,
       digest: digestOf(liveState(LINEAGE)),
     })
-    expect(reconcile(t.files, own)).toEqual({ action: "none" })
-    expect(current(t.files, own)).not.toThrow()
+    expect(reconcile(own)).toEqual({ action: "none" })
+    expect(current(own)).not.toThrow()
     expect(() => assertStateHere(t.bucket.run, t.files, "init")).toThrow(
       "keeps Terraform's state in its own local backend"
     )
@@ -299,19 +336,17 @@ test.skipIf(!terraformBinary)(
   () => {
     const t = real(liveState(LINEAGE))
     const own = t.own(t.bucketPath)
-    expect(() => reconcile(t.files, own)).toThrow(
-      "is the state bucket's own state"
-    )
+    expect(() => reconcile(own)).toThrow("is the state bucket's own state")
     expect(t.read(t.bucketPath).resources).toEqual(liveState(LINEAGE).resources)
     // The same with a local state to move, and with nothing yet.
     const local = real()
     writeFileSync(local.files.state, JSON.stringify(liveState(LINEAGE)))
-    expect(() => reconcile(local.files, local.own(local.bucketPath))).toThrow(
+    expect(() => reconcile(local.own(local.bucketPath))).toThrow(
       "is the state bucket's own state"
     )
     expect(existsSync(local.files.state)).toBe(true)
     const fresh = real()
-    expect(() => reconcile(fresh.files, fresh.own(fresh.bucketPath))).toThrow(
+    expect(() => reconcile(fresh.own(fresh.bucketPath))).toThrow(
       "is the state bucket's own state"
     )
   }
@@ -323,20 +358,18 @@ test.skipIf(!terraformBinary)(
     const t = real(liveState(LINEAGE))
     const x = join(t.directory, "x.tfstate")
     const a = t.own(x, "a")
-    reconcile(t.files, a)
+    reconcile(a)
     const b = t.own(x, "b")
     // Machine A moves the state on to Y with Terraform.
     a.configure(join(t.directory, "y.tfstate"))
     expect(a.init("-migrate-state", "-force-copy")).toBe(0)
-    expect(reconcile(t.files, a).action).not.toBe("move")
+    expect(reconcile(a).action).not.toBe("move")
     // X still holds the same copy: harmless until Y changes.
-    expect(current(t.files, b)).not.toThrow()
+    expect(current(b)).not.toThrow()
     apply(t, a, 2)
-    expect(current(t.files, a)).not.toThrow()
+    expect(current(a)).not.toThrow()
     expect(t.read(x).lineage).toBe(LINEAGE)
-    expect(current(t.files, b)).toThrow(
-      "does not hold this installation's current"
-    )
+    expect(current(b)).toThrow("does not hold this installation's current")
   }
 )
 
@@ -346,16 +379,16 @@ test.skipIf(!terraformBinary)(
     const t = real(liveState(LINEAGE))
     const x = join(t.directory, "x.tfstate")
     const a = t.own(x, "a")
-    reconcile(t.files, a)
+    reconcile(a)
     const b = t.own(x, "b")
     a.configure(join(t.directory, "y.tfstate"))
     expect(a.init("-migrate-state", "-force-copy")).toBe(0)
     // B applies to X before A records Y.
     apply(t, b, 2)
-    expect(() => reconcile(t.files, a)).toThrow(
+    expect(() => reconcile(a)).toThrow(
       "does not hold this installation's current"
     )
-    expect(current(t.files, b)).not.toThrow()
+    expect(current(b)).not.toThrow()
   }
 )
 
@@ -365,7 +398,7 @@ test.skipIf(!terraformBinary)(
     const t = real(liveState(LINEAGE))
     const x = join(t.directory, "x.tfstate")
     const a = t.own(x, "a")
-    reconcile(t.files, a)
+    reconcile(a)
     // Some backends give a migrated state a new lineage.
     const y = join(t.directory, "y.tfstate")
     writeFileSync(
@@ -374,13 +407,11 @@ test.skipIf(!terraformBinary)(
     )
     a.configure(y)
     expect(a.init("-reconfigure")).toBe(0)
-    expect(reconcile(t.files, a).action).toBe("record")
+    expect(reconcile(a).action).toBe("record")
     expect(pointerIn(t.read(t.bucketPath)).lineage).toBe("lineage-new")
     apply(t, a, 2)
     const b = t.own(x, "b")
-    expect(current(t.files, b)).toThrow(
-      "does not hold this installation's current"
-    )
+    expect(current(b)).toThrow("does not hold this installation's current")
   }
 )
 
@@ -389,13 +420,13 @@ test.skipIf(!terraformBinary)(
   () => {
     const t = real(liveState(LINEAGE))
     const a = t.own(join(t.directory, "x.tfstate"), "a")
-    reconcile(t.files, a)
+    reconcile(a)
     a.configure(join(t.directory, "y.tfstate"))
     expect(a.init("-migrate-state", "-force-copy")).toBe(0)
     // No reconcile here: the process stopped. The next init picks it up.
     expect(a.init()).toBe(0)
-    expect(() => reconcile(t.files, a)).not.toThrow()
-    expect(current(t.files, a)).not.toThrow()
+    expect(() => reconcile(a)).not.toThrow()
+    expect(current(a)).not.toThrow()
   }
 )
 
@@ -404,15 +435,13 @@ test.skipIf(!terraformBinary)(
   () => {
     const t = real(liveState(LINEAGE))
     const own = t.own(join(t.directory, "x.tfstate"))
-    reconcile(t.files, own)
+    reconcile(own)
     own.configure(join(t.directory, "z.tfstate"))
     expect(own.init("-reconfigure")).toBe(0)
-    expect(() => reconcile(t.files, own)).toThrow(
+    expect(() => reconcile(own)).toThrow(
       "does not hold this installation's current"
     )
-    expect(current(t.files, own)).toThrow(
-      "does not hold this installation's current"
-    )
+    expect(current(own)).toThrow("does not hold this installation's current")
   }
 )
 
@@ -422,17 +451,16 @@ test.skipIf(!terraformBinary)(
     const t = real()
     const ownPath = join(t.directory, "own.tfstate")
     const own = t.own(ownPath)
-    expect(reconcile(t.files, own).action).toBe("record")
+    expect(reconcile(own).action).toBe("record")
     const seeded = t.read(ownPath)
     expect(seeded.resources).toEqual([])
     expect(pointerIn(t.read(t.bucketPath)).lineage).toBe(seeded.lineage)
-    expect(current(t.files, own)).not.toThrow()
+    expect(current(own)).not.toThrow()
     const other = t.own(join(t.directory, "other.tfstate"), "other")
-    expect(current(t.files, other)).toThrow(
-      "does not hold this installation's current"
-    )
-    // A first apply that failed half way still kept its resources, even if
-    // the pointer missed them: an empty backend is still refused.
+    expect(current(other)).toThrow("does not hold this installation's current")
+    // A first apply that failed half way and never recorded its result:
+    // the writer stays, and an empty backend is still refused.
+    beginOwnWrite(own.files, own.runs, "operation-1")
     const partial = join(t.directory, "partial.tfstate")
     writeFileSync(
       partial,
@@ -444,16 +472,121 @@ test.skipIf(!terraformBinary)(
     expect(own.run(["state", "push", partial]).status).toBe(0)
     own.configure(join(t.directory, "empty.tfstate"))
     expect(own.init("-reconfigure")).toBe(0)
-    expect(current(t.files, own)).toThrow(
-      "does not hold this installation's current"
-    )
+    expect(current(own)).toThrow("did not record the result")
+    expect(current(other)).toThrow("did not record the result")
     own.configure(ownPath)
     expect(own.init("-reconfigure")).toBe(0)
-    expect(current(t.files, own)).not.toThrow()
-    recordOwnState(t.files, own.runs)
-    expect(pointerIn(t.read(t.bucketPath)).digest).toBe(
-      digestOf(liveState(seeded.lineage))
+    expect(current(own)).not.toThrow()
+    expect(reconcile(own).action).toBe("record")
+    const recorded = pointerIn(t.read(t.bucketPath))
+    expect(recorded.writer).toBeNull()
+    expect(recorded.digest).toBe(digestOf(t.read(ownPath)))
+    expect(recorded.digest).not.toBe(digestOf(seeded))
+  }
+)
+
+test.skipIf(!terraformBinary)(
+  "a result that could not be recorded keeps every other copy out until it is",
+  () => {
+    const t = real(liveState(LINEAGE))
+    const x = join(t.directory, "x.tfstate")
+    const a = t.own(x, "a")
+    reconcile(a)
+    // B holds a copy of the same state elsewhere.
+    const y = join(t.directory, "y.tfstate")
+    writeFileSync(y, readFileSync(x))
+    const b = t.own(y, "b")
+    expect(current(b)).not.toThrow()
+    // A changes X, and recording it in the bucket fails once.
+    let fail = false
+    const flaky: TerraformRun = (args, options) =>
+      fail && args[0] === "state" && args[1] === "push"
+        ? { status: 1, stdout: "" }
+        : t.bucket.run(args, options)
+    beginOwnWrite(a.files, { ...a.runs, bucket: flaky }, "operation-1")
+    apply(t, { ...a, runs: a.runs }, 2)
+    expect(current(b)).toThrow("does not hold this installation's current")
+    beginOwnWrite(a.files, a.runs, "operation-2")
+    const pulled = JSON.parse(
+      a.run(["state", "pull"], { capture: true }).stdout
     )
+    const next = join(t.directory, "next.tfstate")
+    writeFileSync(
+      next,
+      JSON.stringify({
+        ...pulled,
+        serial: pulled.serial + 1,
+        outputs: { ...pulled.outputs, version: { value: 3, type: "number" } },
+      })
+    )
+    expect(a.run(["state", "push", next]).status).toBe(0)
+    fail = true
+    expect(() => finishOwnWrite(a.files, { ...a.runs, bucket: flaky })).toThrow(
+      "Terraform could not write the state bucket"
+    )
+    fail = false
+    // The writer stays: B's copy is refused, even though its serial and
+    // contents are those the pointer last recorded.
+    expect(current(b)).toThrow("did not record the result")
+    expect(current(b, "operation-other")).toThrow("did not record the result")
+    // The next init where it ran records it.
+    expect(current(a)).not.toThrow()
+    expect(reconcile(a).action).toBe("record")
+    expect(pointerIn(t.read(t.bucketPath)).writer).toBeNull()
+    expect(current(b)).toThrow("does not hold this installation's current")
+    // Or, once that run is confirmed stopped, another machine takes it over.
+    beginOwnWrite(a.files, a.runs, "operation-3")
+    const c = t.own(x, "c")
+    expect(current(c)).toThrow("did not record the result")
+    expect(current(c, "operation-3")).not.toThrow()
+    expect(reconcile(c, "operation-3").action).toBe("record")
+  }
+)
+
+test.skipIf(!terraformBinary)(
+  "a change to an accepted copy of another lineage is recorded, and the other copy is refused",
+  () => {
+    const t = real(liveState(LINEAGE))
+    const y = join(t.directory, "y.tfstate")
+    const a = t.own(y, "a")
+    reconcile(a)
+    // The old copy X has the same contents under another lineage.
+    const x = join(t.directory, "x.tfstate")
+    writeFileSync(
+      x,
+      JSON.stringify({ ...t.read(y), lineage: "lineage-old", serial: 1 })
+    )
+    const b = t.own(x, "b")
+    expect(current(b)).not.toThrow()
+    apply(t, b, 2)
+    expect(pointerIn(t.read(t.bucketPath))).toMatchObject({
+      lineage: "lineage-old",
+      writer: null,
+    })
+    expect(current(b)).not.toThrow()
+    expect(current(a)).toThrow("does not hold this installation's current")
+  }
+)
+
+test.skipIf(!terraformBinary)(
+  "a tainted instance is part of the state: an untainted copy is refused",
+  () => {
+    const t = real(liveState(LINEAGE))
+    const x = join(t.directory, "x.tfstate")
+    const a = t.own(x, "a")
+    reconcile(a)
+    const y = join(t.directory, "y.tfstate")
+    writeFileSync(
+      y,
+      JSON.stringify({ ...t.read(x), lineage: "lineage-copy", serial: 1 })
+    )
+    const b = t.own(y, "b")
+    expect(current(b)).not.toThrow()
+    beginOwnWrite(a.files, a.runs, "operation-1")
+    expect(a.run(["taint", "terraform_data.api"]).status).toBe(0)
+    finishOwnWrite(a.files, a.runs)
+    expect(t.read(x).resources[0].instances[0].status).toBe("tainted")
+    expect(current(b)).toThrow("does not hold this installation's current")
   }
 )
 
@@ -464,7 +597,7 @@ test.skipIf(!terraformBinary)(
     const foreign = join(t.directory, "foreign.tfstate")
     writeFileSync(foreign, JSON.stringify(liveState("other-installation")))
     const own = t.own(foreign)
-    expect(() => reconcile(t.files, own)).toThrow("already holds a state")
+    expect(() => reconcile(own)).toThrow("already holds a state")
     expect(t.read(t.bucketPath)).toBeUndefined()
     expect(t.read(foreign).lineage).toBe("other-installation")
   }
@@ -480,9 +613,7 @@ test.skipIf(!terraformBinary)(
       JSON.stringify({ ...liveState("other-installation"), resources: [] })
     )
     const own = t.own(foreign)
-    expect(() => reconcile(t.files, own)).toThrow(
-      "already holds a different state"
-    )
+    expect(() => reconcile(own)).toThrow("already holds a different state")
     expect(t.read(foreign).lineage).toBe("other-installation")
     expect(t.read(t.bucketPath).resources).toHaveLength(1)
   }
@@ -496,7 +627,7 @@ test.skipIf(!terraformBinary)(
     const ownPath = join(t.directory, "own.tfstate")
     writeFileSync(ownPath, JSON.stringify(liveState(LINEAGE)))
     const own = t.own(ownPath)
-    const done = reconcile(t.files, own)
+    const done = reconcile(own)
     expect(done.action).toBe("record")
     expect(existsSync(t.files.state)).toBe(false)
     expect(t.read(ownPath).resources).toHaveLength(1)

@@ -249,6 +249,10 @@ in its own backend: add the file before its first `init`.
   is refused too: migrate again.
 - Every machine that runs the drivers for this installation needs the same
   file. A local backend lives on one machine only.
+- A command that changes the state marks the pointer while it runs. If it
+  stops before it records its result, other machines are refused until
+  `init` runs where it ran, or, once you have confirmed it stopped, until
+  you pass `--take-over <operation id>` (the refusal names it).
 - To bring the state back to the bucket, save it with `state pull` while the
   file is in place, delete the file, run `init`, then
   `state push -force <saved file>`.

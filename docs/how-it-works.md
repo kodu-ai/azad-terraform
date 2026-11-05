@@ -166,13 +166,23 @@ unchanged.
 
 The bucket's Terraform state then holds a pointer: no resources, and one
 output, `azad_state_moved`, recording the installation's current state: its
-lineage, its serial and a digest of its resource instances' attributes and
-its outputs (not the bookkeeping Terraform versions format differently). The
-drivers rewrite it inside the operation record after every command that
-changes the state, also when that command failed, since a failed apply keeps
-what it created.
+lineage, its serial and a digest of its resources (provider binding and
+every instance's status, deposed key, attributes, private data and
+dependencies) and its outputs. Only bookkeeping that Terraform versions
+encode differently is left out of the digest (sensitivity paths and resource
+identities). The
+drivers rewrite it inside the operation record around every command that
+changes the state. Before the command, they record the backend's state with
+this run as the writer: the machine, the instance directory and the
+operation. After it, also when it failed (a failed apply keeps what it
+created), they record the result and clear the writer. If that record fails,
+the command fails and the writer stays.
 
-An own backend holds the current state when its state has the recorded
+While a writer is set, only that writer, or a run passing
+`--take-over <operation>`, may use the backend: the same lineage at the
+recorded serial or later. Its next `init` records the result.
+
+Without a writer, an own backend holds the current state when its state has the recorded
 lineage and a later serial, or the same serial and digest. With another
 lineage, it must have exactly the recorded digest: Terraform's
 `init -migrate-state` copies the state, and some backends give the copy a new

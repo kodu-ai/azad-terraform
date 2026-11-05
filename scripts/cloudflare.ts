@@ -37,7 +37,8 @@ import {
   initOwnBackend,
   ownBackend,
   ownBackendFile,
-  recordOwnState,
+  beginOwnWrite,
+  finishOwnWrite,
 } from "./own-backend"
 import {
   assertMoved,
@@ -984,7 +985,8 @@ async function main() {
    */
   const checkState = () => {
     if (command === "force-unlock" || command === "backup-keys") return
-    if (own && runs) assertOwnCurrent(files, own, runs, initCommand)
+    if (own && runs)
+      assertOwnCurrent(files, own, runs, initCommand, options["take-over"])
     // state push stays possible: it is how a state comes back to the bucket.
     else if (!(command === "state" && forwardedRaw[0] === "push"))
       assertStateHere(terraform, files, initCommand)
@@ -1067,9 +1069,11 @@ async function main() {
     { takeOver: options["take-over"] },
     (lease) => {
       checkState()
+      if (own && runs)
+        beginOwnWrite(files, runs, leaseSchema.parse(JSON.parse(lease)).id)
       const status = terraform([command, ...forwarded]).status
       // Recorded even after a failure: a failed apply keeps what it created.
-      if (own && runs) recordOwnState(files, runs)
+      if (own && runs) finishOwnWrite(files, runs)
       // The deployment object tells release updates what this infrastructure
       // provides; it is written after every successful apply.
       if (

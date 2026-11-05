@@ -428,6 +428,58 @@ test("with a backend_override.tf, commands run in the installation's copy of the
   expect(terraform.calls()).toHaveLength(1)
 })
 
+test("with a backend_override.tf, a command that changes the state records it in the bucket's pointer, inside the operation record", async () => {
+  const f = layout("terraform-cloudflare-own-apply-")
+  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  saveCloudflare(f.files, result, f.credentialsFile)
+  initialized(f.files)
+  writeFileSync(
+    ownBackendFile(f.files),
+    'terraform {\n  backend "s3" {\n    bucket = "team-state"\n  }\n}\n'
+  )
+  initializeOwnBackend(f.files.directory)
+  const terraform = stateTerraform(f.directory)
+  terraform.answer(
+    "bucket-state",
+    pointerState({ backend: "s3", lineage: "lineage-own", serial: 3 })
+  )
+  terraform.answer("root", recordedState("lineage-own"))
+  const apply = driver(
+    [
+      "import",
+      "terraform_data.x",
+      "x",
+      "--root",
+      f.root,
+      "--source",
+      f.source.path,
+      "--instance-dir",
+      f.files.instance,
+    ],
+    { PATH: terraform.path }
+  )
+  expect(apply.stderr.toString()).toBe("")
+  expect(apply.exitCode).toBe(0)
+  // Two pointer writes (the writer, then the result) around the import.
+  expect(terraform.calls().map((call) => call.args[1])).toEqual([
+    "state",
+    "import",
+    "state",
+  ])
+  const pointer = JSON.parse(
+    terraform.current("bucket-state").outputs.azad_state_moved.value
+  )
+  expect(pointer).toMatchObject({
+    lineage: "lineage-own",
+    serial: 4,
+    writer: null,
+  })
+  expect(stateCalls(f.source).map((call) => call.command)).toEqual([
+    "acquire",
+    "finish",
+  ])
+})
+
 test("a moved installation without its backend_override.tf refuses to plan against the bucket's pointer", async () => {
   const f = layout("terraform-cloudflare-pointer-")
   const result = await prepareCloudflare(input, app, boundary().fetcher)
