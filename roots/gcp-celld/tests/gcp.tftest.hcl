@@ -145,6 +145,50 @@ run "hands_the_deploy_its_infrastructure" {
   }
 }
 
+run "updates_stay_with_the_cli_without_an_updater_image" {
+  command = plan
+  variables {
+    deployment = {
+      env_file = "tests/fixtures/settings.env"
+    }
+  }
+  assert {
+    condition     = length(module.updater) == 0 && nonsensitive(output.deploy.updater) == null
+    error_message = "Without an updater image nothing is created for console updates and the API gets no starter."
+  }
+}
+
+run "console_updates_run_as_jobs_through_the_starter" {
+  command = plan
+  variables {
+    deployment = {
+      env_file = "tests/fixtures/settings.env"
+    }
+    updater_image  = "ghcr.io/kodu-ai/azad-updater@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    install_bucket = "azad-board-1a2b-1f2e3d4c-install"
+  }
+  assert {
+    condition     = length(module.updater) == 1 && nonsensitive(output.deploy.updater.url) == "http://127.0.0.1:8095"
+    error_message = "The API reaches its pod's update starter on loopback."
+  }
+  assert {
+    condition     = module.updater[0].service_account == "azad-updater" && module.updater[0].starter.image == var.updater_image
+    error_message = "Update Jobs run the pinned image as azad-updater."
+  }
+  assert {
+    condition     = jsondecode(module.updater[0].starter.env.AZAD_INSTALL_STORE).bucket == "azad-board-1a2b-1f2e3d4c-install"
+    error_message = "The starter reads the bucket the driver passed."
+  }
+}
+
+run "console_updates_need_the_state_bucket" {
+  command = plan
+  variables {
+    updater_image = "ghcr.io/kodu-ai/azad-updater@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  }
+  expect_failures = [var.updater_image]
+}
+
 run "deploying_needs_https_origins" {
   command = plan
   variables {

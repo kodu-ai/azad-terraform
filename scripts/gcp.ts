@@ -465,6 +465,9 @@ async function main() {
           ...terraformEnvironment(files),
           CLOUDFLARE_API_TOKEN: token,
           TF_VAR_first_deploy_pending: String(firstDeployPending),
+          // The updater's grants reach only this bucket's install/ objects
+          // and secrets (modules/gcp/updater).
+          TF_VAR_install_bucket: store.bucket,
         },
         stdin: "inherit",
         stdout: run.capture ? "pipe" : "inherit",

@@ -154,3 +154,27 @@ variable "ssh_allowed_private_cidrs" {
   }
 }
 
+
+variable "updater_image" {
+  description = "The updater image, pinned by digest (ghcr.io/kodu-ai/azad-updater@sha256:...), which turns on release updates from the console: the API pods get a starter sidecar that runs each update as a Kubernetes Job in this cluster. The azad CLI release that pins the image sets it. Null keeps updates to the CLI (`azad update`)."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.updater_image == null || can(regex("^ghcr\\.io/kodu-ai/azad-updater@sha256:[a-f0-9]{64}$", var.updater_image))
+    error_message = "Use ghcr.io/kodu-ai/azad-updater@sha256:<digest>, or null."
+  }
+  validation {
+    condition     = var.updater_image == null || var.install_bucket != null
+    error_message = "Console updates need the installation's state bucket (install_bucket); run Terraform through scripts/gcp.ts, which passes it."
+  }
+}
+
+variable "install_bucket" {
+  description = "The installation's state bucket, which scripts/gcp.ts creates and passes (TF_VAR_install_bucket). The updater reaches only its install/ objects and this installation's secrets."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.install_bucket == null || can(regex("^[a-z0-9][a-z0-9_.-]{1,61}[a-z0-9]$", var.install_bucket))
+    error_message = "Use a GCS bucket name."
+  }
+}

@@ -22,6 +22,8 @@ module "gke" {
   proxy_only_subnet_range = var.proxy_only_subnet_range
   deletion_protection     = var.deletion_protection
   backup_agent            = var.disk_backups.schedule != "off"
+  # Update Jobs deploy the bundles into both fleets.
+  fleet_service_accounts = concat(["azad-api", "azad-web"], local.updater ? ["azad-updater"] : [])
   # Without deletion protection, destroy also removes the deployments and cell state.
   force_destroy = !var.deletion_protection
 }
@@ -73,6 +75,7 @@ resource "terraform_data" "released_volumes" {
 }
 
 locals {
+  updater    = var.updater_image != null
   dns        = var.cloudflare_zone_id != null
   google_tls = local.dns && !var.cloudflare_proxy
   # The address DNS uses: the checked load balancer, or before the first
@@ -290,9 +293,28 @@ module "api" {
     pool_size = floor(80 / var.api_replicas)
   }
   database_pooler_password = random_password.database.result
+  # The update starter (module.updater): the only container in these pods
+  # with a Kubernetes token.
+  sidecars = local.updater ? [module.updater[0].starter] : []
   # The proxy is injected into these pods by the operator
   # (module.database_proxy), so that must exist before the first pod is created.
   depends_on = [module.database_proxy]
+}
+
+# Release updates from the console (var.updater_image): the starter in each
+# API pod runs an update as a Job in this cluster under its own identity,
+# azad-updater, which alone can reach the state bucket's install objects,
+# the installation's secrets, Cloud SQL and the fleets. An update never runs
+# Terraform; infrastructure changes stay with the CLI.
+module "updater" {
+  source         = "../../modules/gcp/updater"
+  count          = local.updater ? 1 : 0
+  project_id     = var.project_id
+  project_number = data.google_project.current.number
+  name           = var.name
+  namespace      = kubernetes_namespace_v1.azad.metadata[0].name
+  image          = var.updater_image
+  install_bucket = var.install_bucket
 }
 
 module "web" {
@@ -427,4 +449,5 @@ module "app" {
     [data.google_compute_subnetwork.cluster.ip_cidr_range],
     var.ssh_allowed_private_cidrs,
   ))
+  updater = local.updater ? { url = module.updater[0].url } : null
 }
