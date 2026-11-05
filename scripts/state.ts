@@ -538,7 +538,7 @@ export function installStore(
         "--phase",
         phase,
         "--executor",
-        `cli:${hostname()}:${process.pid}`,
+        `${hostname()} pid ${process.pid}`,
         ...(revision ? ["--revision", revision] : []),
         ...(takeOver ? ["--confirm-stopped", takeOver] : []),
       ])
@@ -583,20 +583,27 @@ export function withOperation(
   store: Pick<ReturnType<typeof installStore>, "acquire" | "finish" | "stop">,
   phase: string,
   options: { takeOver?: string; revision?: string },
-  work: (lease: string) => number
+  // A child stopped by a signal reports no exit status.
+  work: (lease: string) => number | null
 ): number {
   const lease = store.acquire(phase, options.takeOver, options.revision)
   const ignore = () => {}
   process.on("SIGINT", ignore)
   process.on("SIGTERM", ignore)
-  let status = 1
+  let status: number | null = 1
   try {
     status = work(lease)
   } finally {
     process.off("SIGINT", ignore)
     process.off("SIGTERM", ignore)
     if (status === 0) store.finish(lease)
-    else store.stop(lease, `${phase} exited with status ${status}.`)
+    else
+      store.stop(
+        lease,
+        status === null
+          ? `${phase} was interrupted.`
+          : `${phase} exited with status ${status}.`
+      )
   }
-  return status
+  return status ?? 1
 }

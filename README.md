@@ -134,7 +134,7 @@ are the ones you'll actually touch.
 
 | Name | Required? | What it's for | Example |
 | --- | --- | --- | --- |
-| `AZAD_SOURCE` | Yes, unless you pass `--source` | The app checkout that `setup`, `refresh`, `plan`, `apply` and `destroy` deploy from | `~/src/azad` |
+| `AZAD_SOURCE` | Yes, unless you pass `--source` | The app checkout that `setup`, `refresh`, `plan`, `apply`, `deploy`, `destroy` and `backup-keys` use, and `init` while it moves a 0.0.x local state | `~/src/azad` |
 | Google credentials | Cloud SQL and Google Cloud | Application Default Credentials for Terraform and the deploy | `gcloud auth application-default login` |
 
 Don't export `CLOUDFLARE_API_TOKEN`: the drivers read it from the instance's
@@ -224,7 +224,7 @@ setting in `terraform.tfvars.json` or move to a newer release of this repo
 ### Moving from 0.0.x
 
 Releases before 0.1.0 kept Terraform's state in the instance directory. Run
-`init` from this release once: it creates the bucket, moves the state into it
+`init --source <app checkout>` from this release once: it creates the bucket, moves the state into it
 and keeps the old file as `terraform.tfstate.before-remote-<time>`. The next
 `plan` shows the old deploy resource leaving Terraform's state (nothing is
 destroyed), and `deploy` moves the keys and receipt into your cloud. On

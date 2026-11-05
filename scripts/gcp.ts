@@ -299,7 +299,7 @@ const USAGE = `Usage: gcp.ts setup --credentials FILE --project-id ID --region R
        gcp.ts refresh|plan|apply|destroy|deploy --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld] [--take-over OPERATION] [terraform arguments]
        gcp.ts backup-keys --out NEW_DIR --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld]
        gcp.ts phase|init|output|show|state|force-unlock --instance-dir DIR [--root gcp-celld] [terraform arguments]
---source may instead come from AZAD_SOURCE. state mv|rm|push also needs it.`
+--source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init while it moves a 0.0.x local state.`
 
 async function main() {
   const [command, ...args] = process.argv.slice(2)
@@ -468,7 +468,8 @@ async function main() {
       }
     )
     return {
-      status: result.exitCode,
+      // Terraform stopped by a signal has no exit code; that is a failure.
+      status: result.exitCode ?? 1,
       stdout: run.capture ? (result.stdout?.toString() ?? "") : "",
     }
   }

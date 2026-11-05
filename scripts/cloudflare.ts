@@ -697,7 +697,7 @@ const USAGE = `Usage: cloudflare.ts setup --database-provider cloudsql|postgres 
        cloudflare.ts refresh|plan|apply|destroy|deploy|import [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR [--take-over OPERATION] [terraform arguments]
        cloudflare.ts backup-keys --out NEW_DIR [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR
        cloudflare.ts init|output|show|state|validate|console|force-unlock [--root cloudsql|postgres] --instance-dir DIR [terraform arguments]
---source may instead come from AZAD_SOURCE. state mv|rm|push also needs it.`
+--source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init while it moves a 0.0.x local state.`
 
 /** Arguments that print the usage instead of running a command. */
 export const HELP = new Set(["--help", "-h", "help"])
@@ -901,7 +901,8 @@ async function main() {
       }
     )
     return {
-      status: result.exitCode,
+      // Terraform stopped by a signal has no exit code; that is a failure.
+      status: result.exitCode ?? 1,
       stdout: run.capture ? (result.stdout?.toString() ?? "") : "",
     }
   }

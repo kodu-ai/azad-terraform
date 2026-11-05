@@ -292,11 +292,15 @@ test("a command that changes the installation holds the operation record until i
       () => 2
     )
   ).toBe(2)
+  // A child killed by a signal has no exit status: the run failed.
+  expect(withOperation(store, "deploy", {}, () => null)).toBe(1)
   expect(calls).toEqual([
     "acquire terraform-apply - -",
     "finish",
     "acquire deploy op-0 abc",
     "stop deploy exited with status 2.",
+    "acquire deploy - -",
+    "stop deploy was interrupted.",
   ])
   expect(changingPhase("apply", [])).toBe("terraform-apply")
   expect(changingPhase("state", ["rm", "x"])).toBe("terraform-state")
