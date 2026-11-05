@@ -516,6 +516,7 @@ async function main() {
       if (!app) throw new SetupError(USAGE)
       process.exitCode = initOwnBackend({
         files,
+        own,
         runs,
         forwarded: forwardedRaw,
         store: app,
@@ -652,6 +653,7 @@ async function main() {
         if (own && runs)
           beginOwnWrite(
             files,
+            own,
             runs,
             z.object({ id: z.string() }).parse(JSON.parse(lease)).id
           )

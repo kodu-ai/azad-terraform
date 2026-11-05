@@ -946,6 +946,7 @@ async function main() {
       if (!app) throw new SetupError(USAGE)
       process.exitCode = initOwnBackend({
         files,
+        own,
         runs,
         forwarded: forwardedRaw,
         store: app,
@@ -1070,7 +1071,7 @@ async function main() {
     (lease) => {
       checkState()
       if (own && runs)
-        beginOwnWrite(files, runs, leaseSchema.parse(JSON.parse(lease)).id)
+        beginOwnWrite(files, own, runs, leaseSchema.parse(JSON.parse(lease)).id)
       const status = terraform([command, ...forwarded]).status
       // Recorded even after a failure: a failed apply keeps what it created.
       if (own && runs) finishOwnWrite(files, runs)

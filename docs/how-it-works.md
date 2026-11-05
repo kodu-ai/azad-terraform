@@ -173,14 +173,18 @@ encode differently is left out of the digest (sensitivity paths and resource
 identities). The
 drivers rewrite it inside the operation record around every command that
 changes the state. Before the command, they record the backend's state with
-this run as the writer: the machine, the instance directory and the
-operation. After it, also when it failed (a failed apply keeps what it
+this run as the writer: the machine, the instance directory, the operation
+and a digest of the destination it writes (the backend configuration
+Terraform recorded in the working data, partial configuration included, and
+the workspace). After it, also when it failed (a failed apply keeps what it
 created), they record the result and clear the writer. If that record fails,
 the command fails and the writer stays.
 
 While a writer is set, only that writer, or a run passing
-`--take-over <operation>`, may use the backend: the same lineage at the
-recorded serial or later. Its next `init` records the result.
+`--take-over <operation>`, may use the backend, and only the same
+destination: whatever it holds is the command's result, even with another
+lineage (a `state push -force`), while a clone of it is refused. That run's
+next `init` records the result.
 
 Without a writer, an own backend holds the current state when its state has the recorded
 lineage and a later serial, or the same serial and digest. With another

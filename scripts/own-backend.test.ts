@@ -15,6 +15,7 @@ import {
   assertOwnCurrent,
   assertStateHere,
   declaredBackend,
+  destinationOf,
   digestOf,
   ownBackend,
   ownBackendFile,
@@ -268,7 +269,11 @@ type Machine = {
   runs: Runs
 }
 const reconcile = (own: Machine, takeOver?: string) =>
-  reconcileOwnBackend(own.files, own.runs, { write: true, takeOver })
+  reconcileOwnBackend(own.files, own.runs, {
+    write: true,
+    takeOver,
+    destination: destinationOf(own.where),
+  })
 const current = (own: Machine, takeOver?: string) => () =>
   assertOwnCurrent(own.files, own.where, own.runs, "init", takeOver)
 /** A command that writes `next(state)` to `own`, as the drivers run one. */
@@ -278,7 +283,7 @@ function write(
   next: (state: Record<string, unknown> & { serial: number }) => object,
   runs: Runs = own.runs
 ) {
-  beginOwnWrite(own.files, runs, "operation-1")
+  beginOwnWrite(own.files, own.where, runs, "operation-1")
   const pulled = JSON.parse(
     own.run(["state", "pull"], { capture: true }).stdout
   )
@@ -460,7 +465,7 @@ test.skipIf(!terraformBinary)(
     expect(current(other)).toThrow("does not hold this installation's current")
     // A first apply that failed half way and never recorded its result:
     // the writer stays, and an empty backend is still refused.
-    beginOwnWrite(own.files, own.runs, "operation-1")
+    beginOwnWrite(own.files, own.where, own.runs, "operation-1")
     const partial = join(t.directory, "partial.tfstate")
     writeFileSync(
       partial,
@@ -503,10 +508,10 @@ test.skipIf(!terraformBinary)(
       fail && args[0] === "state" && args[1] === "push"
         ? { status: 1, stdout: "" }
         : t.bucket.run(args, options)
-    beginOwnWrite(a.files, { ...a.runs, bucket: flaky }, "operation-1")
+    beginOwnWrite(a.files, a.where, { ...a.runs, bucket: flaky }, "operation-1")
     apply(t, { ...a, runs: a.runs }, 2)
     expect(current(b)).toThrow("does not hold this installation's current")
-    beginOwnWrite(a.files, a.runs, "operation-2")
+    beginOwnWrite(a.files, a.where, a.runs, "operation-2")
     const pulled = JSON.parse(
       a.run(["state", "pull"], { capture: true }).stdout
     )
@@ -535,7 +540,7 @@ test.skipIf(!terraformBinary)(
     expect(pointerIn(t.read(t.bucketPath)).writer).toBeNull()
     expect(current(b)).toThrow("does not hold this installation's current")
     // Or, once that run is confirmed stopped, another machine takes it over.
-    beginOwnWrite(a.files, a.runs, "operation-3")
+    beginOwnWrite(a.files, a.where, a.runs, "operation-3")
     const c = t.own(x, "c")
     expect(current(c)).toThrow("did not record the result")
     expect(current(c, "operation-3")).not.toThrow()
@@ -582,7 +587,7 @@ test.skipIf(!terraformBinary)(
     )
     const b = t.own(y, "b")
     expect(current(b)).not.toThrow()
-    beginOwnWrite(a.files, a.runs, "operation-1")
+    beginOwnWrite(a.files, a.where, a.runs, "operation-1")
     expect(a.run(["taint", "terraform_data.api"]).status).toBe(0)
     finishOwnWrite(a.files, a.runs)
     expect(t.read(x).resources[0].instances[0].status).toBe("tainted")
@@ -632,5 +637,116 @@ test.skipIf(!terraformBinary)(
     expect(existsSync(t.files.state)).toBe(false)
     expect(t.read(ownPath).resources).toHaveLength(1)
     expect(pointerIn(t.read(t.bucketPath)).lineage).toBe(LINEAGE)
+  }
+)
+
+test("a destination is the configuration Terraform recorded, partial configuration included", () => {
+  const directory = temporary()
+  const own = { root: join(directory, "root"), data: join(directory, "data") }
+  expect(destinationOf(own)).toBeUndefined()
+  mkdirSync(own.data, { recursive: true })
+  const at = (backend: object) => {
+    writeFileSync(
+      join(own.data, "terraform.tfstate"),
+      JSON.stringify({ backend })
+    )
+    return destinationOf(own)
+  }
+  // Terraform's hash is the same for both: it covers the block before
+  // -backend-config values are merged.
+  const x = at({ type: "http", config: { address: "https://s/x" }, hash: 1 })
+  const y = at({ type: "http", config: { address: "https://s/y" }, hash: 1 })
+  expect(x).not.toBe(y)
+  writeFileSync(join(own.data, "environment"), "blue")
+  expect(
+    at({ type: "http", config: { address: "https://s/y" }, hash: 1 })
+  ).not.toBe(y)
+  // A relative local path is resolved; the digest never shows the configuration.
+  const local = at({ type: "local", config: { path: "../x.tfstate" } })
+  expect(local).toMatch(/^[a-f0-9]{64}$/u)
+  expect(
+    at({ type: "local", config: { path: join(directory, "x.tfstate") } })
+  ).toBe(local)
+})
+
+test.skipIf(!terraformBinary)(
+  "an unrecorded result is recovered only through the backend that was written, not a clone of it",
+  () => {
+    const t = real(liveState(LINEAGE))
+    const x = join(t.directory, "x.tfstate")
+    const a = t.own(x, "a")
+    reconcile(a)
+    const y = join(t.directory, "y.tfstate")
+    writeFileSync(y, readFileSync(x))
+    const b = t.own(y, "b")
+    let fail = false
+    const flaky: TerraformRun = (args, options) =>
+      fail && args[0] === "state" && args[1] === "push"
+        ? { status: 1, stdout: "" }
+        : t.bucket.run(args, options)
+    beginOwnWrite(a.files, a.where, a.runs, "operation-1")
+    const pulled = JSON.parse(
+      a.run(["state", "pull"], { capture: true }).stdout
+    )
+    const next = join(t.directory, "next.tfstate")
+    writeFileSync(
+      next,
+      JSON.stringify({
+        ...pulled,
+        serial: pulled.serial + 1,
+        outputs: { ...pulled.outputs, version: { value: 2, type: "number" } },
+      })
+    )
+    expect(a.run(["state", "push", next]).status).toBe(0)
+    fail = true
+    expect(() =>
+      finishOwnWrite(a.files, { ...a.runs, bucket: flaky })
+    ).toThrow()
+    fail = false
+    // A take-over through the clone is refused, and so is A's own switch to it.
+    expect(current(b, "operation-1")).toThrow("did not record the result")
+    expect(() => reconcile(b, "operation-1")).toThrow(
+      "did not record the result"
+    )
+    a.configure(y)
+    expect(a.init("-reconfigure")).toBe(0)
+    expect(current(a)).toThrow("did not record the result")
+    a.configure(x)
+    expect(a.init("-reconfigure")).toBe(0)
+    expect(reconcile(a).action).toBe("record")
+    expect(pointerIn(t.read(t.bucketPath))).toMatchObject({
+      serial: t.read(x).serial,
+      digest: digestOf(t.read(x)),
+      writer: null,
+    })
+    expect(t.read(x).outputs.version.value).toBe(2)
+    expect(current(b)).toThrow("does not hold this installation's current")
+  }
+)
+
+test.skipIf(!terraformBinary)(
+  "an unrecorded state push -force of another lineage is recovered as the result",
+  () => {
+    const t = real(liveState(LINEAGE))
+    const x = join(t.directory, "x.tfstate")
+    const a = t.own(x, "a")
+    reconcile(a)
+    beginOwnWrite(a.files, a.where, a.runs, "operation-1")
+    const restored = join(t.directory, "restored.tfstate")
+    writeFileSync(restored, JSON.stringify(liveState("lineage-restored", 1)))
+    expect(a.run(["state", "push", "-force", restored]).status).toBe(0)
+    const failing: TerraformRun = (args, options) =>
+      args[0] === "state" && args[1] === "push"
+        ? { status: 1, stdout: "" }
+        : t.bucket.run(args, options)
+    expect(() =>
+      finishOwnWrite(a.files, { ...a.runs, bucket: failing })
+    ).toThrow()
+    expect(current(a)).not.toThrow()
+    expect(reconcile(a).action).toBe("record")
+    expect(pointerIn(t.read(t.bucketPath))).toMatchObject({
+      lineage: "lineage-restored",
+      writer: null,
+    })
   }
 )
