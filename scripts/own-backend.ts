@@ -161,13 +161,72 @@ const workingDataSchema = z.looseObject({
 })
 
 /**
- * A digest of the backend and workspace the own backend's working data is
- * initialized for: the configuration Terraform recorded there, partial
- * configuration included, and the selected workspace; for a local backend,
- * this machine and the resolved paths. Only a digest leaves the machine,
- * since the configuration may hold a credential.
+ * Environment variables Terraform's backends read to choose where the state
+ * is (not how to authenticate): an http address, a Postgres connection, a
+ * Consul agent, a Kubernetes cluster and namespace, S3 and OSS endpoints and
+ * the AWS profile that may name one, and HCP Terraform's organization,
+ * project and host. TF_WORKSPACE selects the workspace for every backend.
  */
-export function destinationOf(own: OwnBackend): string | undefined {
+const LOCATION_ENVIRONMENT = [
+  "TF_HTTP_ADDRESS",
+  "PG_CONN_STR",
+  "PG_SCHEMA_NAME",
+  "CONSUL_HTTP_ADDR",
+  "KUBE_CONFIG_PATH",
+  "KUBE_CONFIG_PATHS",
+  "KUBE_CTX",
+  "KUBE_HOST",
+  "KUBE_NAMESPACE",
+  "AWS_PROFILE",
+  "AWS_ENDPOINT_URL",
+  "AWS_ENDPOINT_URL_S3",
+  "AWS_S3_ENDPOINT",
+  "ALICLOUD_OSS_ENDPOINT",
+  "TF_CLOUD_HOSTNAME",
+  "TF_CLOUD_ORGANIZATION",
+  "TF_CLOUD_PROJECT",
+]
+
+/** Backend settings that authenticate rather than locate: never part of a destination. */
+const CREDENTIAL =
+  /(?:^|_)(?:password|secret|token|credentials|sas_token|access_key|secret_key|private_key|client_key|client_certificate|encryption_key|kms_encryption_key)$/iu
+
+/** `value` without credential settings, at any depth. */
+function withoutCredentials(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutCredentials)
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => !CREDENTIAL.test(key))
+        .map(([key, item]) => [key, withoutCredentials(item)])
+    )
+  return value
+}
+
+/** A connection string without its password, in URL or key=value form. */
+function withoutPassword(value: string): string {
+  try {
+    const url = new URL(value)
+    url.password = ""
+    return url.toString()
+  } catch {
+    return value.replaceAll(/password\s*=\s*('[^']*'|\S*)/giu, "")
+  }
+}
+
+/**
+ * A digest of where the own backend's working data reads and writes the
+ * state: the configuration Terraform recorded there (partial configuration
+ * included), the environment variables that choose a backend's location,
+ * and the effective workspace (TF_WORKSPACE, or the selected one); for a
+ * local backend, this machine and the resolved state paths, a named
+ * workspace's directory under the root unless workspace_dir names one. Only
+ * a digest leaves the machine, and credentials never enter it.
+ */
+export function destinationOf(
+  own: OwnBackend,
+  environment: Record<string, string | undefined> = process.env
+): string | undefined {
   const record = join(own.data, "terraform.tfstate")
   if (!existsSync(record)) return undefined
   const backend = workingDataSchema.parse(
@@ -176,18 +235,42 @@ export function destinationOf(own: OwnBackend): string | undefined {
   if (!backend) return undefined
   const selected = join(own.data, "environment")
   const workspace =
-    (existsSync(selected) && readFileSync(selected, "utf8").trim()) || "default"
+    environment.TF_WORKSPACE ||
+    (existsSync(selected) && readFileSync(selected, "utf8").trim()) ||
+    "default"
   const config = backend.config ?? {}
-  const path = (value: unknown, otherwise: string | null) =>
-    typeof value === "string" ? resolve(own.root, value) : otherwise
+  const path = (value: unknown, otherwise: string) =>
+    resolve(own.root, typeof value === "string" ? value : otherwise)
   const where =
     backend.type === "local"
       ? {
           machine: hostname(),
-          path: path(config.path, resolve(own.root, "terraform.tfstate")),
-          workspace_dir: path(config.workspace_dir, null),
+          state:
+            workspace === "default"
+              ? path(config.path, "terraform.tfstate")
+              : join(
+                  path(config.workspace_dir, "terraform.tfstate.d"),
+                  workspace,
+                  "terraform.tfstate"
+                ),
         }
-      : config
+      : {
+          config: withoutCredentials({
+            ...config,
+            ...(typeof config.conn_str === "string"
+              ? { conn_str: withoutPassword(config.conn_str) }
+              : {}),
+          }),
+          environment: Object.fromEntries(
+            LOCATION_ENVIRONMENT.flatMap((name) => {
+              const value = environment[name]
+              if (!value) return []
+              return [
+                [name, name === "PG_CONN_STR" ? withoutPassword(value) : value],
+              ]
+            })
+          ),
+        }
   return createHash("sha256")
     .update(JSON.stringify(canonical({ type: backend.type, where, workspace })))
     .digest("hex")

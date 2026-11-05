@@ -750,3 +750,191 @@ test.skipIf(!terraformBinary)(
     })
   }
 )
+
+test("a destination counts the location environment and a local workspace's own directory, never credentials", () => {
+  const directory = temporary()
+  const own = { root: join(directory, "root"), data: join(directory, "data") }
+  mkdirSync(own.data, { recursive: true })
+  const record = (backend: object) =>
+    writeFileSync(
+      join(own.data, "terraform.tfstate"),
+      JSON.stringify({ backend })
+    )
+  record({ type: "http", config: { address: null } })
+  const x = destinationOf(own, { TF_HTTP_ADDRESS: "https://s/x" })
+  expect(destinationOf(own, { TF_HTTP_ADDRESS: "https://s/y" })).not.toBe(x)
+  expect(
+    destinationOf(own, { TF_HTTP_ADDRESS: "https://s/x", TF_WORKSPACE: "blue" })
+  ).not.toBe(x)
+  // Credentials change nothing.
+  expect(
+    destinationOf(own, {
+      TF_HTTP_ADDRESS: "https://s/x",
+      TF_HTTP_PASSWORD: "p",
+    })
+  ).toBe(x)
+  record({ type: "http", config: { address: "https://s/x", password: "one" } })
+  const withPassword = destinationOf(own, {})
+  record({ type: "http", config: { address: "https://s/x", password: "two" } })
+  expect(destinationOf(own, {})).toBe(withPassword)
+  record({ type: "pg", config: { conn_str: "postgres://u:one@db/x" } })
+  const pg = destinationOf(own, {})
+  record({ type: "pg", config: { conn_str: "postgres://u:two@db/x" } })
+  expect(destinationOf(own, {})).toBe(pg)
+  record({ type: "s3", config: { bucket: "b", key: "k", access_key: "one" } })
+  const s3 = destinationOf(own, {})
+  record({ type: "s3", config: { bucket: "b", key: "k", access_key: "two" } })
+  expect(destinationOf(own, {})).toBe(s3)
+  record({
+    type: "s3",
+    config: { bucket: "b", key: "other", access_key: "two" },
+  })
+  expect(destinationOf(own, {})).not.toBe(s3)
+  // A named local workspace lives under its own root unless workspace_dir says otherwise.
+  const shared = join(directory, "shared.tfstate")
+  record({ type: "local", config: { path: shared, workspace_dir: null } })
+  writeFileSync(join(own.data, "environment"), "blue")
+  const other = { root: join(directory, "other-root"), data: own.data }
+  expect(destinationOf(other, {})).not.toBe(destinationOf(own, {}))
+})
+
+/**
+ * A Terraform http state backend on 127.0.0.1, as Terraform's http backend
+ * speaks it, in its own process: Terraform runs synchronously here.
+ */
+async function httpStates() {
+  const script = join(temporary(), "server.ts")
+  writeFileSync(
+    script,
+    `const states = new Map()
+const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
+  const path = new URL(request.url).pathname
+  if (request.method === "PUT") { states.set(path, await request.text()); return new Response(null) }
+  if (request.method === "GET") { const state = states.get(path); return state ? new Response(state) : new Response(null, { status: 404 }) }
+  if (request.method === "POST") { states.set(path, await request.text()); return new Response(null) }
+  if (request.method === "DELETE") { states.delete(path); return new Response(null) }
+  return new Response(null, { status: 405 })
+} })
+console.log(server.port)
+`
+  )
+  const child = Bun.spawn([process.execPath, "--no-env-file", script], {
+    stdout: "pipe",
+  })
+  const reader = child.stdout.getReader()
+  let text = ""
+  while (!text.includes("\n")) {
+    const chunk = await reader.read()
+    if (chunk.done) throw new Error("The http state server did not start.")
+    text += new TextDecoder().decode(chunk.value)
+  }
+  const url = (path: string) => `http://127.0.0.1:${text.trim()}${path}`
+  return {
+    url,
+    read: async (path: string) => (await fetch(url(path))).text(),
+    write: async (path: string, state: string) => {
+      await fetch(url(path), { method: "PUT", body: state })
+    },
+    stop: () => child.kill(),
+  }
+}
+
+test.skipIf(!terraformBinary)(
+  "an unrecorded result is not recovered from an http backend the environment points elsewhere",
+  async () => {
+    const http = await httpStates()
+    const previous = process.env.TF_HTTP_ADDRESS
+    try {
+      const t = real(liveState(LINEAGE))
+      const a = t.own(join(t.directory, "unused.tfstate"), "a")
+      const config = 'terraform {\n  backend "http" {}\n}\n'
+      writeFileSync(join(a.where.root, "main.tf"), config)
+      writeFileSync(ownBackendFile(a.files), config)
+      process.env.TF_HTTP_ADDRESS = http.url("/x")
+      expect(a.init("-reconfigure")).toBe(0)
+      reconcile(a)
+      await http.write("/y", await http.read("/x"))
+      const failing: TerraformRun = (args, options) =>
+        args[0] === "state" && args[1] === "push"
+          ? { status: 1, stdout: "" }
+          : t.bucket.run(args, options)
+      beginOwnWrite(a.files, a.where, a.runs, "operation-1")
+      const pulled = JSON.parse(
+        a.run(["state", "pull"], { capture: true }).stdout
+      )
+      const next = join(t.directory, "next.tfstate")
+      writeFileSync(
+        next,
+        JSON.stringify({
+          ...pulled,
+          serial: pulled.serial + 1,
+          outputs: { ...pulled.outputs, version: { value: 2, type: "number" } },
+        })
+      )
+      expect(a.run(["state", "push", next]).status).toBe(0)
+      expect(() =>
+        finishOwnWrite(a.files, { ...a.runs, bucket: failing })
+      ).toThrow()
+      // The same working data, pointed at the clone by the environment.
+      process.env.TF_HTTP_ADDRESS = http.url("/y")
+      expect(current(a)).toThrow("did not record the result")
+      expect(() => reconcile(a, "operation-1")).toThrow(
+        "did not record the result"
+      )
+      process.env.TF_HTTP_ADDRESS = http.url("/x")
+      expect(reconcile(a).action).toBe("record")
+      expect(JSON.parse(await http.read("/x")).outputs.version.value).toBe(2)
+    } finally {
+      if (previous === undefined) delete process.env.TF_HTTP_ADDRESS
+      else process.env.TF_HTTP_ADDRESS = previous
+      http.stop()
+    }
+  }
+)
+
+test.skipIf(!terraformBinary)(
+  "two roots' named local workspaces are different destinations, even with one shared default path",
+  () => {
+    const t = real(liveState(LINEAGE))
+    const shared = join(t.directory, "shared.tfstate")
+    const a = t.own(shared, "a")
+    const b = t.own(shared, "b")
+    for (const machine of [a, b])
+      expect(machine.run(["workspace", "new", "blue"]).status).toBe(0)
+    reconcile(a)
+    // B's blue workspace is its own file, holding a copy of A's.
+    const blue = (machine: Machine) =>
+      join(
+        machine.where.root,
+        "terraform.tfstate.d",
+        "blue",
+        "terraform.tfstate"
+      )
+    writeFileSync(blue(b), readFileSync(blue(a)))
+    expect(current(b)).not.toThrow()
+    const failing: TerraformRun = (args, options) =>
+      args[0] === "state" && args[1] === "push"
+        ? { status: 1, stdout: "" }
+        : t.bucket.run(args, options)
+    beginOwnWrite(a.files, a.where, a.runs, "operation-1")
+    const pulled = JSON.parse(
+      a.run(["state", "pull"], { capture: true }).stdout
+    )
+    const next = join(t.directory, "next.tfstate")
+    writeFileSync(
+      next,
+      JSON.stringify({
+        ...pulled,
+        serial: pulled.serial + 1,
+        outputs: { ...pulled.outputs, version: { value: 2, type: "number" } },
+      })
+    )
+    expect(a.run(["state", "push", next]).status).toBe(0)
+    expect(() =>
+      finishOwnWrite(a.files, { ...a.runs, bucket: failing })
+    ).toThrow()
+    expect(current(b, "operation-1")).toThrow("did not record the result")
+    expect(reconcile(a).action).toBe("record")
+    expect(current(b)).toThrow("does not hold this installation's current")
+  }
+)
