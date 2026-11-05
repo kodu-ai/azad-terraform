@@ -480,10 +480,10 @@ test("with a backend_override.tf, commands run in the installation's copy of the
   const refused = gcp("plan", "-out=terraform.tfplan")
   expect(refused.exitCode).toBe(1)
   expect(refused.stderr.toString()).toContain("not initialized yet")
-  const identity = initializeOwnBackend(instance.files.directory)
+  initializeOwnBackend(instance.files.directory)
   terraform.answer(
     "bucket-state",
-    pointerState({ backend: "gcs", identity, lineage: "lineage-own" })
+    pointerState({ backend: "gcs", lineage: "lineage-own", serial: 3 })
   )
   terraform.answer("root", recordedState("lineage-own"))
   const planned = gcp("plan", "-out=terraform.tfplan")
@@ -519,11 +519,7 @@ test("a check that passed before the operation record is taken is made again ins
   terraform.answer(
     "root",
     recordedState("lineage-bucket"),
-    pointerState({
-      backend: "s3",
-      identity: "s3 7 default",
-      lineage: "lineage-bucket",
-    })
+    pointerState({ backend: "s3", lineage: "lineage-bucket", serial: 9 })
   )
   const apply = Bun.spawnSync(
     [

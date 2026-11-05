@@ -165,11 +165,19 @@ your own init arguments (`-migrate-state`, partial configuration) reach it
 unchanged.
 
 The bucket's Terraform state then holds a pointer: no resources, and one
-output, `azad_state_moved`, with the backend's identity and the lineage of
-its state. The identity is the backend type, the configuration hash Terraform
-records in the working data (never the configuration itself, which may hold
-a credential) and the selected workspace; for a local backend, the machine
-and the file's absolute path.
+output, `azad_state_moved`, recording the installation's current state: its
+lineage, its serial and a digest of its resource instances' attributes and
+its outputs (not the bookkeeping Terraform versions format differently). The
+drivers rewrite it inside the operation record after every command that
+changes the state, also when that command failed, since a failed apply keeps
+what it created.
+
+An own backend holds the current state when its state has the recorded
+lineage and a later serial, or the same serial and digest. With another
+lineage, it must have exactly the recorded digest: Terraform's
+`init -migrate-state` copies the state, and some backends give the copy a new
+lineage. A recorded state without resources or outputs matches by lineage
+only, so no other empty backend passes for it.
 
 `init` holds the operation record while it writes the pointer.
 `bucket-state/` reads and writes the bucket's state without the root's
@@ -185,17 +193,15 @@ providers.
   once more with the next serial (the same check) and recorded.
 - One that holds a different state, or any state while the installation has
   none, is refused, and nothing is written.
-- A new installation's pointer records its empty backend. The first command
-  that writes a state there records its lineage.
-- When `init` on a machine whose working data had the recorded backend
-  selects another one holding the same lineage (`init -migrate-state`), the
-  pointer moves to it. Any other mismatch is refused.
+- A new installation's empty backend first gets an empty state with a new
+  lineage, which the pointer records.
+- Once the pointer exists, `init` records a backend that holds the current
+  state (a finished migration) and refuses any other.
 
 Every command checks the pointer first, and a command that changes anything
 checks it again inside the operation record:
 
-- With the file, the bucket must point at exactly this backend and
-  workspace, and the backend must hold the recorded lineage.
+- With the file, the backend must hold the current state.
 - Without the file, a bucket that holds the pointer is refused, except by
   `state push`, which brings a state back.
 

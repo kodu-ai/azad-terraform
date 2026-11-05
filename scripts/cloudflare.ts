@@ -37,7 +37,7 @@ import {
   initOwnBackend,
   ownBackend,
   ownBackendFile,
-  recordFirstState,
+  recordOwnState,
 } from "./own-backend"
 import {
   assertMoved,
@@ -945,7 +945,6 @@ async function main() {
       if (!app) throw new SetupError(USAGE)
       process.exitCode = initOwnBackend({
         files,
-        own,
         runs,
         forwarded: forwardedRaw,
         store: app,
@@ -1069,7 +1068,8 @@ async function main() {
     (lease) => {
       checkState()
       const status = terraform([command, ...forwarded]).status
-      if (status === 0 && own && runs) recordFirstState(files, own, runs)
+      // Recorded even after a failure: a failed apply keeps what it created.
+      if (own && runs) recordOwnState(files, runs)
       // The deployment object tells release updates what this infrastructure
       // provides; it is written after every successful apply.
       if (

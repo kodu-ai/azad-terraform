@@ -17,21 +17,25 @@
  * backend's state in the copy stays.
  *
  * The bucket's Terraform state then holds only a pointer: no resources, and
- * one output naming the backend the state lives in (its type, configuration
- * hash and workspace, as Terraform's working data records them) and the
- * lineage of that state. Every command checks it, inside the operation
- * record when it changes anything: without the file the drivers refuse to
- * plan the bucket as an empty installation, and with it they refuse any
- * backend other than the recorded one.
+ * one output recording the installation's current state (its lineage, its
+ * serial and a digest of its resources and outputs), written inside the
+ * operation record after every command that changes the state. Every
+ * command checks it, again inside the operation record when it changes
+ * anything: without the file the drivers refuse to plan the bucket as an
+ * empty installation, and with it they accept only a backend that holds the
+ * current state: the same lineage at the recorded serial or later, or
+ * exactly the recorded resources and outputs (a copy Terraform's
+ * `init -migrate-state` made, which may carry a new lineage). An older copy
+ * left behind by a migration, another installation's state and an empty
+ * backend are refused.
  *
  * `init` moves the bucket's state (or a local state of a release before
  * 0.1.0) into an empty backend: it pushes it, checks the bucket did not
  * change (the backend is not the bucket itself), reads it back and compares
  * it, keeps a copy in the instance directory, and only then writes the
- * pointer. It never adopts a backend that already holds another state.
- * Moving between two backends of the operator's own is Terraform's job:
- * `init -migrate-state` on the machine whose working data has the recorded
- * backend, which keeps the lineage; that `init` records the new backend.
+ * pointer. A new installation's empty backend gets an empty state of its
+ * own lineage first. A backend that already holds another state is never
+ * adopted.
  */
 import { createHash, randomUUID } from "node:crypto"
 import {
@@ -132,40 +136,6 @@ export function ownBackend(files: InstanceTerraform): OwnBackend | undefined {
   return { root, data: join(files.directory, ".terraform-own") }
 }
 
-const workingDataSchema = z.looseObject({
-  backend: z
-    .looseObject({
-      type: z.string(),
-      config: z.record(z.string(), z.unknown()).nullish(),
-      hash: z.number().nullish(),
-    })
-    .nullish(),
-})
-
-/**
- * Which backend and workspace the own backend's working data is initialized
- * for: its type and configuration hash (as Terraform records them, so a
- * credential in the configuration is never copied), or for a local backend
- * this machine and the file's absolute path, which is local to it.
- */
-export function backendIdentity(own: OwnBackend): string | undefined {
-  const record = join(own.data, "terraform.tfstate")
-  if (!existsSync(record)) return undefined
-  const backend = workingDataSchema.parse(
-    JSON.parse(readFileSync(record, "utf8"))
-  ).backend
-  if (!backend) return undefined
-  const selected = join(own.data, "environment")
-  const workspace =
-    (existsSync(selected) && readFileSync(selected, "utf8").trim()) || "default"
-  const path = backend.config?.path
-  const where =
-    backend.type === "local"
-      ? `${hostname()}:${resolve(own.root, typeof path === "string" ? path : "terraform.tfstate")}`
-      : String(backend.hash ?? "")
-  return `${backend.type} ${where} ${workspace}`
-}
-
 /**
  * A configuration with only the bucket's backend block, so the bucket's
  * state can be read and written without the root's providers. Returns its
@@ -187,10 +157,10 @@ export const POINTER_OUTPUT = "azad_state_moved"
 const pointerSchema = z.object({
   /** The backend type, or `cloud`, as the operator's file named it. */
   backend: z.string(),
-  /** The backend and workspace the state lives in ({@link backendIdentity}). */
-  identity: z.string(),
-  /** The lineage of the state there; null until it holds one. */
-  lineage: z.string().nullable(),
+  /** The current state's lineage, serial and {@link digestOf} digest. */
+  lineage: z.string(),
+  serial: z.number(),
+  digest: z.string(),
   at: z.string(),
   by: z.string(),
 })
@@ -231,8 +201,86 @@ export function readBackendState(
     : { kind: "none", state }
 }
 
-/** The lineage a backend's state carries, also once a destroy emptied it. */
-const lineageOf = (backend: BackendState) => backend.state?.lineage || undefined
+const serialOf = (state?: State) =>
+  z.number().safeParse(state?.serial).data ?? 0
+
+/** A JSON value with its object keys sorted, so equal data prints alike. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical)
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonical((value as Record<string, unknown>)[key])])
+    )
+  return value
+}
+
+const instanceSchema = z.looseObject({
+  index_key: z.unknown().optional(),
+  attributes: z.unknown().optional(),
+})
+const resourceSchema = z.looseObject({
+  module: z.string().optional(),
+  mode: z.string().optional(),
+  type: z.string().optional(),
+  name: z.string().optional(),
+  instances: z.array(instanceSchema).default([]),
+})
+
+/**
+ * The digest of what a state records: each resource instance's address and
+ * attributes, and each output's value. Bookkeeping that Terraform versions
+ * add or format differently (lineage, serial, sensitivity paths, identity
+ * schema versions) is left out, so the same state digests alike after an
+ * upgrade or a migration.
+ */
+export function digestOf(state?: State): string {
+  const resources = (state?.resources ?? [])
+    .map((resource) => resourceSchema.parse(resource))
+    .map((resource) => ({
+      address: [resource.module, resource.mode, resource.type, resource.name]
+        .map((part) => part ?? "")
+        .join("|"),
+      instances: resource.instances
+        .map((instance) => ({
+          key: JSON.stringify(instance.index_key ?? null),
+          attributes: canonical(instance.attributes ?? null),
+        }))
+        .sort((a, b) => a.key.localeCompare(b.key)),
+    }))
+    .sort((a, b) => a.address.localeCompare(b.address))
+  const outputs = Object.fromEntries(
+    Object.entries(state?.outputs ?? {}).map(([name, output]) => [
+      name,
+      canonical(
+        z.looseObject({ value: z.unknown() }).safeParse(output).data?.value ??
+          null
+      ),
+    ])
+  )
+  return createHash("sha256")
+    .update(JSON.stringify(canonical({ resources, outputs })))
+    .digest("hex")
+}
+/** The digest of a state without resources or outputs. */
+const EMPTY = digestOf()
+
+/**
+ * Whether a backend holds the installation's current state, as the pointer
+ * records it: the same lineage at a later serial, or at the same serial
+ * with the same contents; or, with another lineage (a migrated copy may get
+ * a new one), exactly the recorded contents. An empty recorded state
+ * matches by lineage only, so any other empty backend does not.
+ */
+function holdsCurrent(pointer: StatePointer, own: BackendState): boolean {
+  if (!own.state) return false
+  const serial = serialOf(own.state)
+  const same = digestOf(own.state) === pointer.digest
+  if (own.state.lineage === pointer.lineage)
+    return serial > pointer.serial || (serial === pointer.serial && same)
+  return pointer.digest !== EMPTY && same
+}
 
 /** The backend type a `backend_override.tf` declares: `cloud`, or its `backend` block's label. */
 export function declaredBackend(files: InstanceTerraform): string {
@@ -266,14 +314,14 @@ export function assertStateHere(
 /** Runners for the bucket's configuration and the own backend. */
 export type Runs = { bucket: TerraformRun; own: TerraformRun }
 
-const elsewhere = (file: string, pointer: StatePointer) =>
-  `This installation's Terraform state lives in another ${pointer.backend} backend than the one ${file} selects here (recorded ${pointer.at} from ${pointer.by}). Make the file match that backend and run init, or move the state with init -migrate-state on the machine whose working data has it.`
+const notCurrent = (file: string, pointer: StatePointer) =>
+  `The backend in ${file} does not hold this installation's current Terraform state (lineage ${pointer.lineage}, serial ${pointer.serial}, written ${pointer.at} from ${pointer.by}): it is empty, older or another installation's. Point the file at the backend that holds the current state, or move that state there with init -migrate-state.`
 
 /**
  * Refuses a command in the installation's own backend unless `init`
- * completed here: the bucket points at exactly this backend and workspace,
- * and it holds the installation's lineage. Run it inside the operation
- * record before a command that changes anything.
+ * completed here and the backend holds the installation's current state.
+ * Run it inside the operation record before a command that changes
+ * anything.
  */
 export function assertOwnCurrent(
   files: InstanceTerraform,
@@ -282,9 +330,11 @@ export function assertOwnCurrent(
   init: string
 ): void {
   const file = ownBackendFile(files)
-  const identity = backendIdentity(own)
   const bucketData = join(bucketConfiguration(files).data, "terraform.tfstate")
-  if (!identity || !existsSync(bucketData))
+  if (
+    !existsSync(join(own.data, "terraform.tfstate")) ||
+    !existsSync(bucketData)
+  )
     throw new InstanceError(
       `${file} names this installation's own backend, which is not initialized yet. Run:\n  ${init}`
     )
@@ -293,16 +343,13 @@ export function assertOwnCurrent(
     throw new InstanceError(
       `The state bucket does not point at the backend in ${file} yet. Run:\n  ${init}`
     )
-  if (bucket.pointer.identity !== identity)
-    throw new InstanceError(elsewhere(file, bucket.pointer))
-  const recorded = bucket.pointer.lineage
   if (
-    recorded !== null &&
-    lineageOf(readBackendState(runs.own, `the backend in ${file}`)) !== recorded
-  )
-    throw new InstanceError(
-      `The backend in ${file} does not hold this installation's state (lineage ${recorded}). Run:\n  ${init}`
+    !holdsCurrent(
+      bucket.pointer,
+      readBackendState(runs.own, `the backend in ${file}`)
     )
+  )
+    throw new InstanceError(notCurrent(file, bucket.pointer))
 }
 
 /** What {@link reconcileOwnBackend} did, or would do. */
@@ -312,26 +359,20 @@ export type Reconciled =
   | { action: "move"; kept: string[] }
 
 /**
- * Makes the bucket point at the installation's own backend, moving its
- * state there first when that backend has none; with `write` false it only
- * says whether anything would change. `identity` is the own backend's
- * ({@link backendIdentity}) after this `init`, `previous` the one before.
- * Writes need the installation's operation record held, and `init` to have
- * initialized both configurations.
+ * Makes the bucket point at the installation's current state in its own
+ * backend, moving the state there first when that backend has none; with
+ * `write` false it only says whether anything would change. Writes need the
+ * installation's operation record held, and `init` to have initialized
+ * both configurations.
  *
- * @throws InstanceError When the own backend is the bucket itself, holds
- *   another state than this installation's, is not the recorded one, or the
- *   bucket and a local state disagree; nothing is moved then.
+ * @throws InstanceError When the own backend is the bucket itself, does not
+ *   hold the current state, holds another state than this installation's,
+ *   or the bucket and a local state disagree; nothing is moved then.
  */
 export function reconcileOwnBackend(
   files: InstanceTerraform,
   runs: Runs,
-  options: {
-    write: boolean
-    identity: string
-    previous?: string
-    now?: Date
-  }
+  options: { write: boolean; now?: Date }
 ): Reconciled {
   const file = ownBackendFile(files)
   const backend = declaredBackend(files)
@@ -342,12 +383,15 @@ export function reconcileOwnBackend(
   const time = now.toISOString().replaceAll(/[:.]/gu, "-")
   const aliased = `The backend in ${file} is the state bucket's own state. Point it at another bucket, key or workspace.`
   if (own.kind === "pointer") throw new InstanceError(aliased)
+  const readOwn = () => readBackendState(runs.own, `the backend in ${file}`)
 
-  const pointTo = (lineage: string | null) => {
+  /** Records the own backend's state, as it is now, in the bucket's pointer. */
+  const pointAt = (state: State) => {
     const pointer: StatePointer = {
       backend,
-      identity: options.identity,
-      lineage,
+      lineage: state.lineage,
+      serial: serialOf(state),
+      digest: digestOf(state),
       at: now.toISOString(),
       by: hostname(),
     }
@@ -356,7 +400,7 @@ export function reconcileOwnBackend(
       version: 4,
       terraform_version:
         previous?.terraform_version ?? terraformVersion(runs.own),
-      serial: (z.number().safeParse(previous?.serial).data ?? 0) + 1,
+      serial: serialOf(previous) + 1,
       lineage: previous?.lineage || randomUUID(),
       outputs: {
         [POINTER_OUTPUT]: { value: JSON.stringify(pointer), type: "string" },
@@ -370,14 +414,13 @@ export function reconcileOwnBackend(
     const written = readBackendState(runs.bucket, "the state bucket")
     if (
       written.kind !== "pointer" ||
-      written.pointer.identity !== options.identity ||
-      written.pointer.lineage !== lineage
+      written.pointer.digest !== pointer.digest ||
+      written.pointer.serial !== pointer.serial
     )
       throw new InstanceError(
         "The state bucket did not keep the pointer to this installation's own backend. Inspect it before you retry."
       )
-    if (readBackendState(runs.own, `the backend in ${file}`).kind === "pointer")
-      throw new InstanceError(aliased)
+    if (readOwn().kind === "pointer") throw new InstanceError(aliased)
   }
   /** After a write to the own backend: the bucket must not have changed with it. */
   const assertDistinct = () => {
@@ -392,33 +435,15 @@ export function reconcileOwnBackend(
         `${files.state} holds a local state from a release before 0.1.0, but this installation's state already lives in its own backend. Check which one is current, then move the other out of the way.`
       )
     const { pointer } = bucket
-    const holdsIt =
-      pointer.lineage === null
-        ? own.kind !== "state"
-        : lineageOf(own) === pointer.lineage
-    if (pointer.identity !== options.identity) {
-      // This machine moved the state on from the recorded backend: record
-      // where it is now, when it carries the installation's lineage.
-      if (options.previous !== pointer.identity)
-        throw new InstanceError(elsewhere(file, pointer))
-      if (!holdsIt)
-        throw new InstanceError(
-          `The backend in ${file} does not hold this installation's state. Move it there with Terraform (init -migrate-state keeps its lineage), or point the file back at the recorded backend.`
-        )
-      if (options.write) pointTo(pointer.lineage)
-      return { action: "record", kept: [] }
-    }
-    if (pointer.lineage === null) {
-      // The backend was empty when it was recorded for this installation:
-      // its first state is this installation's.
-      if (own.kind !== "state") return { action: "none" }
-      if (options.write) pointTo(own.state.lineage)
-      return { action: "record", kept: [] }
-    }
-    if (holdsIt) return { action: "none" }
-    throw new InstanceError(
-      `The backend in ${file} does not hold this installation's state: the state bucket records lineage ${pointer.lineage}. If you moved the state to a new backend, move it with Terraform (init -migrate-state keeps its lineage).`
-    )
+    if (!own.state || !holdsCurrent(pointer, own))
+      throw new InstanceError(notCurrent(file, pointer))
+    const unchanged =
+      own.state.lineage === pointer.lineage &&
+      serialOf(own.state) === pointer.serial &&
+      digestOf(own.state) === pointer.digest
+    if (unchanged) return { action: "none" }
+    if (options.write) pointAt(own.state)
+    return { action: "record", kept: [] }
   }
 
   if (
@@ -435,8 +460,31 @@ export function reconcileOwnBackend(
       throw new InstanceError(
         `The backend in ${file} already holds a state, and this installation has none to compare it with. Nothing was recorded; point the file at an empty backend.`
       )
-    // A new installation, or one never applied: its state starts there.
-    if (options.write) pointTo(null)
+    if (!options.write) return { action: "record", kept: [] }
+    // A new installation: its state starts there, with a lineage of its own
+    // that the pointer records, so no other empty backend passes for it.
+    push(
+      runs.own,
+      files,
+      {
+        version: 4,
+        terraform_version: terraformVersion(runs.own),
+        serial: serialOf(own.state) + 1,
+        lineage: own.state?.lineage || randomUUID(),
+        outputs: {},
+        resources: [],
+        check_results: null,
+      },
+      `the backend in ${file}`,
+      true
+    )
+    assertDistinct()
+    own = readOwn()
+    if (!own.state || own.kind !== "none")
+      throw new InstanceError(
+        `The backend in ${file} did not keep the empty state written there. Inspect it before you retry.`
+      )
+    pointAt(own.state)
     return { action: "record", kept: [] }
   }
   // Already there (moved with Terraform, or by an init that stopped before
@@ -450,11 +498,10 @@ export function reconcileOwnBackend(
   if (own.kind === "state") {
     // The same contents may be the bucket's own object under another name:
     // write it once more there, and the bucket must not change.
-    const serial = z.number().safeParse(own.state.serial).data ?? 0
     push(
       runs.own,
       files,
-      { ...own.state, serial: serial + 1 },
+      { ...own.state, serial: serialOf(own.state) + 1 },
       `the backend in ${file}`
     )
   } else {
@@ -463,7 +510,7 @@ export function reconcileOwnBackend(
     push(runs.own, files, source, `the backend in ${file}`, true)
   }
   assertDistinct()
-  own = readBackendState(runs.own, `the backend in ${file}`)
+  own = readOwn()
   if (own.kind !== "state" || contents(own.state) !== contents(source))
     throw new InstanceError(
       `The state read back from the backend in ${file} differs from this installation's, which is unchanged in the state bucket. Inspect that backend before you retry.`
@@ -481,28 +528,19 @@ export function reconcileOwnBackend(
       renameSync(`${files.state}.backup`, `${copy}.previous`)
     kept.push(copy)
   }
-  pointTo(own.state.lineage)
+  pointAt(own.state)
   return { action, kept }
 }
 
 /**
- * After a command changed the own backend: records its first state's
- * lineage in a pointer that has none yet. Holds no lock of its own; run it
- * inside the operation record. A failure only leaves the pointer as it was.
+ * After a command that may have changed the own backend's state, whether or
+ * not it succeeded (a failed apply keeps what it created): records the
+ * state as it is now in the bucket's pointer. Run it inside the operation
+ * record that command held. A failure only leaves the pointer as it was.
  */
-export function recordFirstState(
-  files: InstanceTerraform,
-  own: OwnBackend,
-  runs: Runs
-): void {
-  const identity = backendIdentity(own)
-  if (!identity) return
+export function recordOwnState(files: InstanceTerraform, runs: Runs): void {
   try {
-    reconcileOwnBackend(files, runs, {
-      write: true,
-      identity,
-      previous: identity,
-    })
+    reconcileOwnBackend(files, runs, { write: true })
   } catch (error) {
     process.stderr.write(
       `The state bucket's pointer was not updated: ${error instanceof Error ? error.message : String(error)}\n`
@@ -544,12 +582,12 @@ function terraformVersion(terraform: TerraformRun): string {
  * `init` for an installation with its own backend: initializes the bucket's
  * configuration and the own backend (with the operator's init arguments,
  * so `-migrate-state` between two own backends is Terraform's), then points
- * the bucket at it, moving the state first when the backend has none. Takes
- * the installation's operation record only when something changes.
+ * the bucket at the current state there, moving the state first when the
+ * backend has none. Takes the installation's operation record only when
+ * something changes.
  */
 export function initOwnBackend(options: {
   files: InstanceTerraform
-  own: OwnBackend
   runs: Runs
   forwarded: string[]
   store: Pick<ReturnType<typeof installStore>, "acquire" | "finish" | "stop">
@@ -566,24 +604,17 @@ export function initOwnBackend(options: {
     { capture: true }
   ).status
   if (status !== 0) return status
-  const previous = backendIdentity(options.own)
   status = runs.own(["init", ...options.forwarded]).status
   if (status !== 0) return status
-  const identity = backendIdentity(options.own)
-  if (!identity)
-    throw new InstanceError(
-      `Terraform's init did not record the backend in ${ownBackendFile(files)}.`
-    )
-  const reconcile = (write: boolean) =>
-    reconcileOwnBackend(files, runs, { write, identity, previous })
-  if (reconcile(false).action === "none") return 0
+  if (reconcileOwnBackend(files, runs, { write: false }).action === "none")
+    return 0
   let done = { action: "none" } as Reconciled
   status = withOperation(
     options.store,
     "terraform-state-move",
     { takeOver: options.takeOver },
     () => {
-      done = reconcile(true)
+      done = reconcileOwnBackend(files, runs, { write: true })
       return 0
     }
   )

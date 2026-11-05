@@ -396,12 +396,12 @@ test("with a backend_override.tf, commands run in the installation's copy of the
   const refused = plan()
   expect(refused.exitCode).toBe(1)
   expect(refused.stderr.toString()).toContain("not initialized yet")
-  const identity = initializeOwnBackend(f.files.directory)
+  initializeOwnBackend(f.files.directory)
   // Before init has pointed the bucket at it, the backend is not used.
   expect(plan().stderr.toString()).toContain("does not point at the backend")
   terraform.answer(
     "bucket-state",
-    pointerState({ backend: "cloud", identity, lineage: "lineage-own" })
+    pointerState({ backend: "cloud", lineage: "lineage-own", serial: 3 })
   )
   terraform.answer("root", recordedState("lineage-own"))
   const planned = plan()
@@ -420,13 +420,11 @@ test("with a backend_override.tf, commands run in the installation's copy of the
   // Another backend than the recorded one is refused.
   terraform.answer(
     "bucket-state",
-    pointerState({
-      backend: "s3",
-      identity: "s3 7 default",
-      lineage: "lineage-own",
-    })
+    pointerState({ backend: "s3", lineage: "lineage-other", serial: 4 })
   )
-  expect(plan().stderr.toString()).toContain("lives in another s3 backend")
+  expect(plan().stderr.toString()).toContain(
+    "does not hold this installation's current Terraform state"
+  )
   expect(terraform.calls()).toHaveLength(1)
 })
 
@@ -438,11 +436,7 @@ test("a moved installation without its backend_override.tf refuses to plan again
   const terraform = stateTerraform(f.directory)
   terraform.answer(
     "root",
-    pointerState({
-      backend: "s3",
-      identity: "s3 7 default",
-      lineage: "lineage-own",
-    })
+    pointerState({ backend: "s3", lineage: "lineage-other", serial: 4 })
   )
   const run = (...args: string[]) =>
     driver(
@@ -480,11 +474,7 @@ test("a check that passed before the operation record is taken is made again ins
   terraform.answer(
     "root",
     recordedState("lineage-bucket"),
-    pointerState({
-      backend: "s3",
-      identity: "s3 7 default",
-      lineage: "lineage-bucket",
-    })
+    pointerState({ backend: "s3", lineage: "lineage-bucket", serial: 9 })
   )
   const apply = driver(
     [

@@ -228,13 +228,14 @@ file. The app's install state and keys stay in the installation's bucket.
 The first `init` moves the state from the bucket when the backend has none:
 it pushes it, reads it back and compares it, keeps a copy as
 `terraform.tfstate.before-own-backend-<time>`, and leaves only a pointer in
-the bucket. The pointer names the backend and workspace the state lives in.
-From then on the drivers refuse to run without the file, or with a file
-that selects any other backend, so no machine plans an empty or stale
-installation. A backend that already holds this installation's state is used
-as it is. One that holds another state is refused, and so is the bucket
-itself. A new installation can start in its own backend: add the file before
-its first `init`.
+the bucket. The pointer records the installation's current state, and
+every command that changes the state updates it. From then on the drivers
+refuse to run without the file, or against a backend that holds anything but
+the current state (an empty backend, an older copy, another installation's),
+so no machine plans an empty or stale installation. A backend that already
+holds this installation's state is used as it is. One that holds another
+state is refused, and so is the bucket itself. A new installation can start
+in its own backend: add the file before its first `init`.
 
 - Credentials come from the backend's own login: your AWS profile,
   `terraform login` for HCP Terraform, gcloud for GCS. The drivers never pass
@@ -242,9 +243,10 @@ its first `init`.
 - On HCP Terraform, set the workspace's execution mode to **Local**: plans
   and applies must run on your machine, because a destroy runs local steps.
 - To switch to another backend of your own, change the file and run
-  `init -migrate-state` on a machine that uses the recorded one. Terraform
-  copies the state and keeps its lineage, and the pointer then names the new
-  backend. A backend without this installation's state is refused.
+  `init -migrate-state`. Terraform copies the state, and the next command
+  that changes it makes the old copy stale, so a machine still on the old
+  backend is refused. A copy taken before another machine changed the state
+  is refused too: migrate again.
 - Every machine that runs the drivers for this installation needs the same
   file. A local backend lives on one machine only.
 - To bring the state back to the bucket, save it with `state pull` while the

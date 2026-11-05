@@ -46,11 +46,11 @@ appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.
   }
 }
 
-/** The bucket's state once it points at an own backend. */
+/** The bucket's state once it points at an own backend's state. */
 export function pointerState(pointer: {
   backend: string
-  identity: string
-  lineage: string | null
+  lineage: string
+  serial: number
 }) {
   return {
     version: 4,
@@ -61,6 +61,7 @@ export function pointerState(pointer: {
       azad_state_moved: {
         value: JSON.stringify({
           ...pointer,
+          digest: "0".repeat(64),
           at: "2026-11-05T21:00:00.000Z",
           by: "laptop",
         }),
@@ -81,7 +82,7 @@ export function recordedState(lineage: string) {
   }
 }
 
-/** What an own backend's init leaves in its working data: `cloud` with hash 99. */
+/** What init leaves in the own backend's and the bucket configuration's working data. */
 export function initializeOwnBackend(terraformDirectory: string) {
   for (const [data, record] of [
     [".terraform-own", { backend: { type: "cloud", config: {}, hash: 99 } }],
@@ -93,5 +94,4 @@ export function initializeOwnBackend(terraformDirectory: string) {
       JSON.stringify(record)
     )
   }
-  return "cloud 99 default"
 }
