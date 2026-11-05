@@ -134,7 +134,7 @@ are the ones you'll actually touch.
 
 | Name | Required? | What it's for | Example |
 | --- | --- | --- | --- |
-| `AZAD_SOURCE` | Yes, unless you pass `--source` | The app checkout that `setup`, `refresh`, `plan`, `apply`, `deploy`, `destroy` and `backup-keys` use, and `init` while it moves a 0.0.x local state | `~/src/azad` |
+| `AZAD_SOURCE` | Yes, unless you pass `--source` | The app checkout that `setup`, `refresh`, `plan`, `apply`, `deploy`, `destroy` and `backup-keys` use, and `init` while it moves a 0.0.x local state or the installation has its own backend | `~/src/azad` |
 | Google credentials | Cloud SQL and Google Cloud | Application Default Credentials for Terraform and the deploy | `gcloud auth application-default login` |
 
 Don't export `CLOUDFLARE_API_TOKEN`: the drivers read it from the instance's
@@ -202,6 +202,60 @@ bun --no-env-file scripts/cloudflare.ts backup-keys --root postgres --instance-d
 
 Use the drivers rather than plain `terraform`, which doesn't know where this
 state is. More in [docs/how-it-works.md](docs/how-it-works.md).
+
+### Your own Terraform backend
+
+To keep Terraform's state somewhere else, such as your own S3 bucket, HCP
+Terraform or Azure Storage, write a `backend_override.tf` in the instance's
+`terraform/<root>/` directory. It holds a Terraform `backend` block of any
+type, or a `cloud` block:
+
+```hcl
+terraform {
+  cloud {
+    organization = "my-team"
+    workspaces {
+      name = "azad"
+    }
+  }
+}
+```
+
+Then run `init --source <app checkout>`. From then on the drivers run
+Terraform with that backend, from a copy of this release's root beside the
+file. The app's install state and keys stay in the installation's bucket.
+
+The first `init` moves the state from the bucket when the backend has none:
+it pushes it, reads it back and compares it, keeps a copy as
+`terraform.tfstate.before-own-backend-<time>`, and leaves only a pointer in
+the bucket. The pointer records the installation's current state, and
+every command that changes the state updates it. From then on the drivers
+refuse to run without the file, or against a backend that holds anything but
+the current state (an empty backend, an older copy, another installation's),
+so no machine plans an empty or stale installation. A backend that already
+holds this installation's state is used as it is. One that holds another
+state is refused, and so is the bucket itself. A new installation can start
+in its own backend: add the file before its first `init`.
+
+- Credentials come from the backend's own login: your AWS profile,
+  `terraform login` for HCP Terraform, gcloud for GCS. The drivers never pass
+  the bucket's R2 keys to it.
+- On HCP Terraform, set the workspace's execution mode to **Local**: plans
+  and applies must run on your machine, because a destroy runs local steps.
+- To switch to another backend of your own, change the file and run
+  `init -migrate-state`. Terraform copies the state, and the next command
+  that changes it makes the old copy stale, so a machine still on the old
+  backend is refused. A copy taken before another machine changed the state
+  is refused too: migrate again.
+- Every machine that runs the drivers for this installation needs the same
+  file. A local backend lives on one machine only.
+- A command that changes the state marks the pointer while it runs. If it
+  stops before it records its result, other machines are refused until
+  `init` runs where it ran, or, once you have confirmed it stopped, until
+  you pass `--take-over <operation id>` (the refusal names it).
+- To bring the state back to the bucket, save it with `state pull` while the
+  file is in place, delete the file, run `init`, then
+  `state push -force <saved file>`.
 
 ## Updating
 

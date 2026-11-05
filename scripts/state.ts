@@ -389,14 +389,15 @@ export async function configureBackend(
   return record
 }
 
-const localStateSchema = z.looseObject({
+/** The parts of a Terraform state the drivers compare. */
+export const localStateSchema = z.looseObject({
   lineage: z.string(),
   resources: z.array(z.json()).default([]),
   outputs: z.record(z.string(), z.json()).default({}),
 })
 
 /** What a state records about the installation; a move keeps it exactly (Terraform gives the moved state a new lineage). */
-const contents = (state: z.infer<typeof localStateSchema>) =>
+export const contents = (state: z.infer<typeof localStateSchema>) =>
   JSON.stringify({ resources: state.resources, outputs: state.outputs })
 
 /**

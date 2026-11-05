@@ -7,10 +7,17 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { fakeSource } from "./fixtures/source"
 import { gcpName, prepareGcp } from "./gcp"
 import { instanceTerraform, REPOSITORY } from "./instance"
+import { ownBackendFile } from "./own-backend"
+import {
+  initializeOwnBackend,
+  pointerState,
+  recordedState,
+  stateTerraform,
+} from "./fixtures/terraform"
 import { gcpStore } from "./state"
 import { SettingsRefused, type AppSettings } from "./source"
 
@@ -293,7 +300,8 @@ function initializedInstance(addresses: string[]) {
     `#!/usr/bin/env -S bun --no-env-file
 import { appendFileSync } from "node:fs"
 const args = process.argv.slice(2)
-if (args[1] === "state" && args[2] === "list") process.stdout.write(${JSON.stringify(addresses.map((address) => `${address}\n`).join(""))})
+if (args[1] === "state" && args[2] === "pull") {}
+else if (args[1] === "state" && args[2] === "list") process.stdout.write(${JSON.stringify(addresses.map((address) => `${address}\n`).join(""))})
 else if (args[1] === "output") process.stdout.write("null")
 else {
   appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR, firstDeployPending: process.env.TF_VAR_first_deploy_pending }) + "\\n")
@@ -446,6 +454,91 @@ test("every Terraform run gets the installation's state bucket, which the update
   expect(instance.store.bucket).toBe(
     gcpStore("azad-board-1234", "customer-project").bucket
   )
+})
+
+test("with a backend_override.tf, commands run in the installation's copy of the root, with its own working data", () => {
+  const instance = initializedInstance([])
+  writeFileSync(
+    ownBackendFile(instance.files),
+    'terraform {\n  backend "gcs" {\n    bucket = "team-state"\n  }\n}\n'
+  )
+  const terraform = stateTerraform(dirname(instance.files.instance))
+  const gcp = (...args: string[]) =>
+    Bun.spawnSync(
+      [
+        process.execPath,
+        "--no-env-file",
+        join(import.meta.dir, "gcp.ts"),
+        ...args,
+        "--source",
+        instance.source.path,
+        "--instance-dir",
+        instance.files.instance,
+      ],
+      { env: { PATH: terraform.path }, stdout: "pipe", stderr: "pipe" }
+    )
+  const refused = gcp("plan", "-out=terraform.tfplan")
+  expect(refused.exitCode).toBe(1)
+  expect(refused.stderr.toString()).toContain("not initialized yet")
+  initializeOwnBackend(instance.files.directory)
+  terraform.answer(
+    "bucket-state",
+    pointerState({ backend: "gcs", lineage: "lineage-own", serial: 3 })
+  )
+  terraform.answer("root", recordedState("lineage-own"))
+  const planned = gcp("plan", "-out=terraform.tfplan")
+  expect(planned.stderr.toString()).toBe("")
+  expect(planned.exitCode).toBe(0)
+  const data = join(instance.files.directory, ".terraform-own")
+  expect(terraform.calls().map(({ args, data }) => ({ args, data }))).toEqual([
+    {
+      args: [
+        `-chdir=${join(instance.files.directory, "own-backend", "roots", "gcp-celld")}`,
+        "state",
+        "list",
+      ],
+      data,
+    },
+    {
+      args: [
+        `-chdir=${join(instance.files.directory, "own-backend", "roots", "gcp-celld")}`,
+        "plan",
+        "-target=module.gke",
+        "-target=module.clerk_dns",
+        `-var-file=${instance.files.vars}`,
+        `-out=${join(instance.files.directory, "terraform.tfplan")}`,
+      ],
+      data,
+    },
+  ])
+})
+
+test("a check that passed before the operation record is taken is made again inside it", () => {
+  const instance = initializedInstance([])
+  const terraform = stateTerraform(dirname(instance.files.instance))
+  terraform.answer(
+    "root",
+    recordedState("lineage-bucket"),
+    pointerState({ backend: "s3", lineage: "lineage-bucket", serial: 9 })
+  )
+  const apply = Bun.spawnSync(
+    [
+      process.execPath,
+      "--no-env-file",
+      join(import.meta.dir, "gcp.ts"),
+      "destroy",
+      "--source",
+      instance.source.path,
+      "--instance-dir",
+      instance.files.instance,
+    ],
+    { env: { PATH: terraform.path }, stdout: "pipe", stderr: "pipe" }
+  )
+  expect(apply.exitCode).toBe(1)
+  expect(apply.stderr.toString()).toContain("holds only a pointer")
+  expect(
+    terraform.calls().filter((call) => call.args[1] === "destroy")
+  ).toEqual([])
 })
 
 test("plan, apply, destroy and refresh need the app source checkout", () => {

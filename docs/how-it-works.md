@@ -134,6 +134,9 @@ Each installation owns one directory, outside this repository:
     .terraform/                 Terraform's working data (TF_DATA_DIR)
     installer-state/            Cloudflare: the deploy's cache of keys and receipt
     celld-install/              Google Cloud: the same, plus tools and install.log
+    backend_override.tf         optional: the installation's own backend (you write it)
+    own-backend/, .terraform-own/   with it: the root's copy and working data
+    bucket-state/               with it: a backend-only configuration for the bucket
 ```
 
 Each root declares `backend "s3" {}` (Cloudflare) or `backend "gcs" {}`
@@ -146,6 +149,81 @@ such a state into the bucket: it pushes the file, reads it back and compares
 its resources and outputs, and only then renames it to
 `terraform.tfstate.before-remote-<time>`. A bucket that already holds a
 different state is never written.
+
+### An own backend
+
+A `backend_override.tf` in the root's directory replaces the root's backend
+block with any other backend or a `cloud` block (see `scripts/own-backend.ts`).
+Terraform reads override files only beside the root, and the release
+directory is shared by every installation on the machine, so the drivers copy
+this release's `roots/<root>` and `modules` to `own-backend/` with the file
+and run Terraform there with `.terraform-own/` as its working data. When the
+release or the file changes they replace only the files they copied, so a
+local backend's state in the copy stays. They pass that backend no R2
+credentials and add no `-backend-config` or `-reconfigure` to its `init`, so
+your own init arguments (`-migrate-state`, partial configuration) reach it
+unchanged.
+
+The bucket's Terraform state then holds a pointer: no resources, and one
+output, `azad_state_moved`, recording the installation's current state: its
+lineage, its serial and a digest of its resources (provider binding and
+every instance's status, deposed key, attributes, private data and
+dependencies) and its outputs. Only bookkeeping that Terraform versions
+encode differently is left out of the digest (sensitivity paths and resource
+identities). The
+drivers rewrite it inside the operation record around every command that
+changes the state. Before the command, they record the backend's state with
+this run as the writer: the machine, the instance directory, the operation
+and a digest of the destination it writes: the backend configuration
+Terraform recorded in the working data (partial configuration included,
+credentials left out), the environment variables that choose a backend's
+location (such as `TF_HTTP_ADDRESS`, `PG_CONN_STR` without its password,
+`KUBE_NAMESPACE`, `AWS_ENDPOINT_URL_S3`, `TF_CLOUD_ORGANIZATION`) and the
+effective workspace (`TF_WORKSPACE` or the selected one); for a local
+backend, the machine and the resolved state file, a named workspace's under
+the root's `terraform.tfstate.d` unless `workspace_dir` says otherwise. After it, also when it failed (a failed apply keeps what it
+created), they record the result and clear the writer. If that record fails,
+the command fails and the writer stays.
+
+While a writer is set, only that writer, or a run passing
+`--take-over <operation>`, may use the backend, and only the same
+destination: whatever it holds is the command's result, even with another
+lineage (a `state push -force`), while a clone of it is refused. That run's
+next `init` records the result; run it with the same file and environment as
+the command.
+
+Without a writer, an own backend holds the current state when its state has the recorded
+lineage and a later serial, or the same serial and digest. With another
+lineage, it must have exactly the recorded digest: Terraform's
+`init -migrate-state` copies the state, and some backends give the copy a new
+lineage. A recorded state without resources or outputs matches by lineage
+only, so no other empty backend passes for it.
+
+`init` holds the operation record while it writes the pointer.
+`bucket-state/` reads and writes the bucket's state without the root's
+providers.
+
+- When the own backend holds no state, `init` pushes the bucket's (or a
+  local state of a release before 0.1.0) and checks the bucket did not change
+  with it, so the backend is not the bucket itself. It reads the state back,
+  compares resources and outputs, and keeps a copy as
+  `terraform.tfstate.before-own-backend-<time>`. Only then does it write the
+  pointer.
+- A backend that already holds the same resources and outputs is written
+  once more with the next serial (the same check) and recorded.
+- One that holds a different state, or any state while the installation has
+  none, is refused, and nothing is written.
+- A new installation's empty backend first gets an empty state with a new
+  lineage, which the pointer records.
+- Once the pointer exists, `init` records a backend that holds the current
+  state (a finished migration) and refuses any other.
+
+Every command checks the pointer first, and a command that changes anything
+checks it again inside the operation record:
+
+- With the file, the backend must hold the current state.
+- Without the file, a bucket that holds the pointer is refused, except by
+  `state push`, which brings a state back.
 
 The deploy's directories, saved plans and `.env` hold passwords and signing
 keys: keep the instance directory private.

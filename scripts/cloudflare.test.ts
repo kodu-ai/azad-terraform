@@ -19,6 +19,13 @@ import {
   REPOSITORY,
   type InstanceTerraform,
 } from "./instance"
+import { ownBackendFile } from "./own-backend"
+import {
+  initializeOwnBackend,
+  pointerState,
+  recordedState,
+  stateTerraform,
+} from "./fixtures/terraform"
 import { SettingsRefused, type AppSettings } from "./source"
 import { cloudflareStore } from "./state"
 
@@ -120,13 +127,16 @@ function stateCalls(source: { path: string }) {
     .map((line) => JSON.parse(line))
 }
 
-/** A `terraform` on PATH that prints what it was run with. */
+/**
+ * A `terraform` on PATH that prints what it was run with. Its `state pull`
+ * answers as a bucket without the pointer to an own backend.
+ */
 function echoTerraform(directory: string, body: string) {
   const bin = join(directory, "bin")
   mkdirSync(bin, { recursive: true })
   writeFileSync(
     join(bin, "terraform"),
-    `#!/usr/bin/env -S bun --no-env-file\n${body}\n`,
+    `#!/usr/bin/env -S bun --no-env-file\nif (process.argv[3] === "state" && process.argv[4] === "pull") process.exit(0)\n${body}\n`,
     {
       mode: 0o755,
     }
@@ -358,6 +368,185 @@ test("setup adds its derived settings to the instance's own settings file and ne
   ).toThrow("already exists")
   expect(readFileSync(other.files.settings, "utf8")).toBe("KEEP=this\n")
   expect(existsSync(other.files.vars)).toBe(false)
+})
+
+test("with a backend_override.tf, commands run in the installation's copy of the root, without the bucket's R2 keys", async () => {
+  const f = layout("terraform-cloudflare-own-")
+  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  saveCloudflare(f.files, result, f.credentialsFile)
+  initialized(f.files)
+  writeFileSync(
+    ownBackendFile(f.files),
+    'terraform {\n  cloud {\n    organization = "team"\n    workspaces {\n      name = "azad"\n    }\n  }\n}\n'
+  )
+  const terraform = stateTerraform(f.directory)
+  const plan = () =>
+    driver(
+      [
+        "plan",
+        "--root",
+        f.root,
+        "--source",
+        f.source.path,
+        "--instance-dir",
+        f.files.instance,
+      ],
+      { PATH: terraform.path }
+    )
+  const refused = plan()
+  expect(refused.exitCode).toBe(1)
+  expect(refused.stderr.toString()).toContain("not initialized yet")
+  initializeOwnBackend(f.files.directory)
+  // Before init has pointed the bucket at it, the backend is not used.
+  expect(plan().stderr.toString()).toContain("does not point at the backend")
+  terraform.answer(
+    "bucket-state",
+    pointerState({ backend: "cloud", lineage: "lineage-own", serial: 3 })
+  )
+  terraform.answer("root", recordedState("lineage-own"))
+  const planned = plan()
+  expect(planned.stderr.toString()).toBe("")
+  expect(terraform.calls()).toEqual([
+    {
+      args: [
+        `-chdir=${join(f.files.directory, "own-backend", "roots", f.root)}`,
+        "plan",
+        `-var-file=${f.files.vars}`,
+      ],
+      data: join(f.files.directory, ".terraform-own"),
+      r2Key: null,
+    },
+  ])
+  // Another backend than the recorded one is refused.
+  terraform.answer(
+    "bucket-state",
+    pointerState({ backend: "s3", lineage: "lineage-other", serial: 4 })
+  )
+  expect(plan().stderr.toString()).toContain(
+    "does not hold this installation's current Terraform state"
+  )
+  expect(terraform.calls()).toHaveLength(1)
+})
+
+test("with a backend_override.tf, a command that changes the state records it in the bucket's pointer, inside the operation record", async () => {
+  const f = layout("terraform-cloudflare-own-apply-")
+  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  saveCloudflare(f.files, result, f.credentialsFile)
+  initialized(f.files)
+  writeFileSync(
+    ownBackendFile(f.files),
+    'terraform {\n  backend "s3" {\n    bucket = "team-state"\n  }\n}\n'
+  )
+  initializeOwnBackend(f.files.directory)
+  const terraform = stateTerraform(f.directory)
+  terraform.answer(
+    "bucket-state",
+    pointerState({ backend: "s3", lineage: "lineage-own", serial: 3 })
+  )
+  terraform.answer("root", recordedState("lineage-own"))
+  const apply = driver(
+    [
+      "import",
+      "terraform_data.x",
+      "x",
+      "--root",
+      f.root,
+      "--source",
+      f.source.path,
+      "--instance-dir",
+      f.files.instance,
+    ],
+    { PATH: terraform.path }
+  )
+  expect(apply.stderr.toString()).toBe("")
+  expect(apply.exitCode).toBe(0)
+  // Two pointer writes (the writer, then the result) around the import.
+  expect(terraform.calls().map((call) => call.args[1])).toEqual([
+    "state",
+    "import",
+    "state",
+  ])
+  const pointer = JSON.parse(
+    terraform.current("bucket-state").outputs.azad_state_moved.value
+  )
+  expect(pointer).toMatchObject({
+    lineage: "lineage-own",
+    serial: 4,
+    writer: null,
+  })
+  expect(stateCalls(f.source).map((call) => call.command)).toEqual([
+    "acquire",
+    "finish",
+  ])
+})
+
+test("a moved installation without its backend_override.tf refuses to plan against the bucket's pointer", async () => {
+  const f = layout("terraform-cloudflare-pointer-")
+  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  saveCloudflare(f.files, result, f.credentialsFile)
+  initialized(f.files)
+  const terraform = stateTerraform(f.directory)
+  terraform.answer(
+    "root",
+    pointerState({ backend: "s3", lineage: "lineage-other", serial: 4 })
+  )
+  const run = (...args: string[]) =>
+    driver(
+      [
+        ...args,
+        "--root",
+        f.root,
+        "--source",
+        f.source.path,
+        "--instance-dir",
+        f.files.instance,
+      ],
+      { PATH: terraform.path }
+    )
+  const plan = run("plan")
+  expect(plan.exitCode).toBe(1)
+  expect(plan.stderr.toString()).toContain(
+    "keeps Terraform's state in its own s3 backend (since 2026-11-05T21:00:00.000Z, from laptop)"
+  )
+  expect(stateCalls(f.source)).toEqual([])
+  // A state pushed back into the bucket replaces the pointer.
+  expect(run("state", "push", "-force", "moved.tfstate").exitCode).toBe(0)
+  expect(terraform.calls().map((call) => call.args.slice(1, 3))).toEqual([
+    ["state", "push"],
+  ])
+})
+
+test("a check that passed before the operation record is taken is made again inside it", async () => {
+  const f = layout("terraform-cloudflare-race-")
+  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  saveCloudflare(f.files, result, f.credentialsFile)
+  initialized(f.files)
+  const terraform = stateTerraform(f.directory)
+  // Another machine moves the state while this apply waits for the record.
+  terraform.answer(
+    "root",
+    recordedState("lineage-bucket"),
+    pointerState({ backend: "s3", lineage: "lineage-bucket", serial: 9 })
+  )
+  const apply = driver(
+    [
+      "apply",
+      "--root",
+      f.root,
+      "--source",
+      f.source.path,
+      "--instance-dir",
+      f.files.instance,
+    ],
+    { PATH: terraform.path }
+  )
+  expect(apply.exitCode).toBe(1)
+  expect(apply.stderr.toString()).toContain("holds only a pointer")
+  expect(terraform.calls()).toEqual([])
+  expect(stateCalls(f.source).map((call) => call.command)).toEqual([
+    "acquire",
+    "stop",
+  ])
 })
 
 test("forwards a saved-plan command with the selected token, the instance's variables, working data and the source checkout", async () => {
