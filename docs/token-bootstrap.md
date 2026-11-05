@@ -105,8 +105,10 @@ resource, deletion of a retained deployment token, or recreation of a previously
 saved token.
 
 The deployment token has Account Settings Read, Workers Scripts Write, Workers R2
-Storage Write, Queues Write, Hyperdrive Write and Pages Write on the selected
-account. With verified database TLS selected, it also has Account: SSL and
+Storage Write, Queues Write, Hyperdrive Write, Pages Write and Secrets Store
+Write on the selected account. A deployment token minted before Secrets Store
+Write was added needs it added once: edit the token in the Cloudflare
+dashboard (Account, Secrets Store, Edit); its value stays the same. With verified database TLS selected, it also has Account: SSL and
 Certificates Read, or Write when automatic CA registration is selected. Zone Read, DNS Write and Workers Routes Write apply only to
 the discovered zones. Cloudflare's dashboard calls many API `Write` permissions
 `Edit`. The helper resolves IDs from the official catalog and checks the resource

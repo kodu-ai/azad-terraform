@@ -11,6 +11,7 @@ import { join } from "node:path"
 import { fakeSource } from "./fixtures/source"
 import { gcpName, prepareGcp } from "./gcp"
 import { instanceTerraform, REPOSITORY } from "./instance"
+import { gcpStore } from "./state"
 import { SettingsRefused, type AppSettings } from "./source"
 
 const account = "a".repeat(32)
@@ -260,19 +261,22 @@ function initializedInstance(addresses: string[]) {
   const root = join(REPOSITORY, "roots/gcp-celld")
   const source = fakeSource(directory)
   const files = instanceTerraform(join(directory, "instance"), "gcp-celld")
+  const store = gcpStore("azad-board-1234", "customer-project")
   mkdirSync(files.data, { recursive: true })
   writeFileSync(
     join(files.data, "terraform.tfstate"),
     JSON.stringify({
-      backend: { type: "local", config: { path: files.state } },
+      backend: { type: "gcs", config: { bucket: store.bucket } },
     })
   )
+  writeFileSync(files.backendRecord, JSON.stringify({ store }))
   writeFileSync(files.settings, "CLOUDFLARE_API_TOKEN=fixture-deploy-token\n")
   writeFileSync(
     files.vars,
     JSON.stringify({
       project_id: "customer-project",
       region: "me-central1",
+      name: "azad-board-1234",
       web_host: "board.example.com",
       deployment: {
         revision: "b".repeat(40),
@@ -290,7 +294,8 @@ function initializedInstance(addresses: string[]) {
 import { appendFileSync } from "node:fs"
 const args = process.argv.slice(2)
 if (args[1] === "state" && args[2] === "list") process.stdout.write(${JSON.stringify(addresses.map((address) => `${address}\n`).join(""))})
-else appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR, source: process.env.TF_VAR_source_dir ?? null }) + "\\n")
+else if (args[1] === "output") process.stdout.write("null")
+else appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR, firstDeployPending: process.env.TF_VAR_first_deploy_pending }) + "\\n")
 `,
     { mode: 0o755 }
   )
@@ -343,7 +348,7 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
         `-out=${join(first.files.directory, "terraform.tfplan")}`,
       ],
       data: first.files.data,
-      source: first.source.path,
+      firstDeployPending: "false",
     },
   ])
   // Applying that saved plan applies it as reviewed: no second, unreviewed phase.
@@ -360,6 +365,25 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
     "-input=false",
     join(first.files.directory, "terraform.tfplan"),
   ])
+  // The plan asked whether a deploy happened; the apply held the
+  // installation's operation record, and released it.
+  const calls = readFileSync(
+    join(first.source.path, "state-calls.jsonl"),
+    "utf8"
+  )
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+  expect(calls.map((call) => call.command)).toEqual([
+    "deployed",
+    "acquire",
+    "finish",
+  ])
+  const held = calls.slice(1)
+  expect(held[0].args.slice(0, 2)).toEqual(["--phase", "terraform-apply"])
+  expect(held[0].state.store).toEqual(
+    gcpStore("azad-board-1234", "customer-project")
+  )
 
   const second = initializedInstance([
     "module.gke.google_container_cluster.this",
@@ -372,6 +396,33 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
     `-var-file=${second.files.vars}`,
     `-out=${join(second.files.directory, "terraform.tfplan")}`,
   ])
+})
+
+test("until the first deploy, DNS does not wait for fleets that serve nothing yet", () => {
+  const cluster = "module.gke.google_container_cluster.this"
+  const fresh = initializedInstance([cluster])
+  writeFileSync(join(fresh.source.path, "not-deployed"), "")
+  fresh.gcp("plan", "-out=terraform.tfplan", "--source", fresh.source.path)
+  expect(fresh.calls()[0].firstDeployPending).toBe("true")
+
+  // A direct apply before the cluster exists also runs the full apply.
+  const direct = initializedInstance([])
+  writeFileSync(join(direct.source.path, "not-deployed"), "")
+  direct.gcp("apply", "-input=false", "--source", direct.source.path)
+  expect(direct.calls().map((call) => call.firstDeployPending)).toEqual([
+    "true",
+    "true",
+  ])
+
+  // Once a deploy recorded its receipt, DNS waits on the load balancer again.
+  const deployed = initializedInstance([cluster])
+  deployed.gcp(
+    "plan",
+    "-out=terraform.tfplan",
+    "--source",
+    deployed.source.path
+  )
+  expect(deployed.calls()[0].firstDeployPending).toBe("false")
 })
 
 test("plan, apply, destroy and refresh need the app source checkout", () => {

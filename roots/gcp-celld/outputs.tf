@@ -33,11 +33,16 @@ output "database" {
 }
 
 output "deployment" {
-  description = "Deployed revision and the deploy log; null when only infrastructure is managed."
+  description = "Where `gcp.ts deploy` logs; null when only infrastructure is managed."
   value = var.deployment == null ? null : {
-    revision = module.app[0].revision
-    log      = module.app[0].log
+    log = module.app[0].log
   }
+}
+
+output "deploy" {
+  description = "The handoff `gcp.ts deploy` gives the app's celld-install.ts (without its revision); null when only infrastructure is managed. Holds passwords Terraform generated."
+  sensitive   = true
+  value       = var.deployment == null ? null : module.app[0].handoff
 }
 
 output "load_balancer_address" {

@@ -110,6 +110,8 @@ const deploymentAccountGroups = [
   "Queues Write",
   "Hyperdrive Write",
   "Pages Write",
+  // The installation's keys live in the account's Secrets Store.
+  "Secrets Store Write",
 ]
 
 function permission(groups: Group[], name: string, scope: string) {

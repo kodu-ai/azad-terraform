@@ -61,9 +61,8 @@ variable "deletion_protection" {
 }
 
 variable "deployment" {
-  description = "Deploy the app after provisioning: the Azad source checkout's exact revision (its HEAD, see source_dir) and the installer's private dotenv (Clerk keys; GitHub App and optional settings when configured), which stays out of Terraform state. state_directory keeps the instance keys; back it up. scripts/gcp.ts writes both as paths in the instance directory. Null provisions infrastructure only."
+  description = "What `gcp.ts deploy` deploys with: the installer's private dotenv (Clerk keys; GitHub App and optional settings when configured), which stays out of Terraform state, and state_directory, the deploy's local cache of the instance keys. scripts/gcp.ts writes both as paths in the instance directory, beside the source revision it deploys (deployment.revision, read by the driver only). Null provisions infrastructure only."
   type = object({
-    revision        = string
     env_file        = string
     state_directory = optional(string, ".celld-install")
   })
@@ -74,8 +73,14 @@ variable "deployment" {
   }
 }
 
+variable "first_deploy_pending" {
+  description = "True until the installation's first deploy: its fleets serve nothing before it, so DNS points the hostnames at the load balancer without waiting for healthy backends, and the deploy that follows the apply brings them up. The drivers set it."
+  type        = bool
+  default     = false
+}
+
 variable "ready_timeout_minutes" {
-  description = "How long DNS waits for a new load balancer to serve (certificate issuance included), and how long a deploy waits for the API origin to serve the new revision."
+  description = "How long DNS waits for a new load balancer to serve (certificate issuance included), and how long `gcp.ts deploy` waits for the API origin to serve the new revision."
   type        = number
   default     = 45
 }
@@ -149,12 +154,3 @@ variable "ssh_allowed_private_cidrs" {
   }
 }
 
-variable "source_dir" {
-  description = "Absolute path of the Azad app source checkout (kodu-ai/azad-ide-web) whose scripts/self-host/celld-install.ts deploys the app; its HEAD must be deployment.revision. The drivers set it from --source (TF_VAR_source_dir). Required with a deployment."
-  type        = string
-  default     = null
-  validation {
-    condition     = startswith(coalesce(var.source_dir, "/"), "/")
-    error_message = "Use an absolute path to the Azad source checkout."
-  }
-}

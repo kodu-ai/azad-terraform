@@ -20,22 +20,17 @@ variable "deployment" {
   type = object({
     enabled         = optional(bool, true)
     env_file        = optional(string, ".env.self-host")
-    revision        = string
     state_directory = optional(string, ".installer-state")
   })
   validation {
-    condition     = can(regex("^[a-f0-9]{40}$", var.deployment.revision)) && length(var.deployment.env_file) > 0 && length(var.deployment.state_directory) > 0
-    error_message = "Provide an exact 40-character Git revision, selected installer dotenv file and persistent installer state directory."
+    condition     = length(var.deployment.env_file) > 0 && length(var.deployment.state_directory) > 0
+    error_message = "Provide the selected installer dotenv file and a persistent installer state directory."
   }
 }
 
 
 variable "resource_prefix" {
   type = string
-}
-variable "database_url" {
-  type      = string
-  sensitive = true
 }
 variable "resources" {
   type = object({ buckets = map(string), queue_id = string, queue_name = string })
@@ -67,7 +62,7 @@ variable "github_app_pending" {
 }
 
 variable "source_dir" {
-  description = "Absolute path of the Azad app source checkout (kodu-ai/azad-ide-web) whose scripts/self-host/cloudflare-install.ts deploys and uninstalls the app; its HEAD must be deployment.revision. Required when deployment.enabled; the drivers set it from --source."
+  description = "Absolute path of the Azad app source checkout (kodu-ai/azad-ide-web) whose scripts/self-host/cloudflare-install.ts uninstalls the app on destroy. The drivers set it from --source."
   type        = string
   default     = null
 }

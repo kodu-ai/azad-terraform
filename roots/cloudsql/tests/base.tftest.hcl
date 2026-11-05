@@ -37,7 +37,6 @@ variables {
   deployment = {
     enabled         = false
     env_file        = "tests/fixtures/settings.env"
-    revision        = "0000000000000000000000000000000000000000"
     state_directory = ".installer-state"
   }
 }
@@ -64,7 +63,6 @@ run "installer_handoff" {
   variables {
     deployment = {
       env_file        = "tests/fixtures/settings.env"
-      revision        = "0000000000000000000000000000000000000000"
       state_directory = ".installer-state"
     }
   }
@@ -103,8 +101,7 @@ run "minimal_generated_configuration" {
       authorized_networks = { runner = "198.51.100.10/32" }
     }
     deployment = {
-      enabled  = false
-      revision = "0000000000000000000000000000000000000000"
+      enabled = false
     }
   }
   assert {

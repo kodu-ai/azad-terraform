@@ -8,8 +8,8 @@ module "cloudflare" {
 }
 
 # Clerk's production domain must resolve (and Clerk must issue its
-# certificate) before the installer's preflight reads the Frontend API, so the
-# installation waits for these records; the installer then waits for Clerk.
+# certificate) before the installer's preflight reads the Frontend API; the
+# deploy waits for Clerk after the apply that creates these records.
 module "clerk_dns" {
   source = "../cloudflare/clerk-dns"
   count  = var.clerk_dns == null ? 0 : 1
@@ -32,7 +32,6 @@ module "installation" {
   source_dir                 = var.source_dir
   resource_prefix            = module.cloudflare.resource_prefix
   resources                  = module.cloudflare.resources
-  database_url               = var.database_url
   database_ca_certificate_id = module.cloudflare.database_ca_certificate_id
   storage                    = var.storage
   github_app_pending         = var.github_app_pending

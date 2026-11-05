@@ -1,13 +1,12 @@
 variable "deployment" {
-  description = "Installer handoff. revision is the exact checked-out commit; env_file is the installer's private dotenv (Clerk, GitHub App, optional settings), read only by the deploy script and never stored in Terraform state; state_directory keeps the instance keys, tools and log. The drivers write absolute paths in the instance directory; a relative path is relative to the Terraform root directory."
+  description = "Installer handoff. env_file is the installer's private dotenv (Clerk, GitHub App, optional settings), read only by the deploy script and never stored in Terraform state; state_directory keeps the instance keys, tools and log. The drivers write absolute paths in the instance directory; a relative path is relative to the Terraform root directory."
   type = object({
-    revision        = string
     env_file        = string
     state_directory = optional(string, ".celld-install")
   })
   validation {
-    condition     = can(regex("^[a-f0-9]{40}$", var.deployment.revision)) && length(var.deployment.env_file) > 0 && length(var.deployment.state_directory) > 0
-    error_message = "Provide an exact 40-character Git revision, the installer dotenv file and a persistent state directory."
+    condition     = length(var.deployment.env_file) > 0 && length(var.deployment.state_directory) > 0
+    error_message = "Provide the installer dotenv file and a persistent state directory."
   }
 }
 
@@ -68,8 +67,3 @@ variable "ssh_allowed_private_cidrs" {
   default     = []
 }
 
-variable "source_dir" {
-  description = "Absolute path of the Azad app source checkout (kodu-ai/azad-ide-web) whose scripts/self-host/celld-install.ts deploys the app; its HEAD must be deployment.revision. The drivers set it from --source."
-  type        = string
-  default     = null
-}

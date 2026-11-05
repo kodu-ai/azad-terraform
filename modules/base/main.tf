@@ -30,12 +30,10 @@ module "installation" {
   source_dir      = var.source_dir
   resource_prefix = module.cloudflare.resource_prefix
   resources       = module.cloudflare.resources
-  database_url    = module.database.database_url
   storage         = var.storage
 
   github_app_pending = var.github_app_pending
-  # Clerk's records precede the installer, which waits for Clerk's domain.
-  depends_on = [module.database, module.cloudflare, module.clerk_dns, module.host_routes]
+  depends_on         = [module.database, module.cloudflare, module.clerk_dns, module.host_routes]
 }
 
 module "clerk_dns" {

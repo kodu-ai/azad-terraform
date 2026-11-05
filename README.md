@@ -29,7 +29,8 @@ when you want to run it yourself.
 - The Azad app source. Until app release artifacts are published, the deploy
   builds Azad from a git checkout of [`kodu-ai/azad-ide-web`](https://github.com/kodu-ai/azad-ide-web)
   (you need access to that repo, and Node 26.12.1+ for its build). You point
-  the drivers at it with `--source` or `AZAD_SOURCE`.
+  the drivers at it with `--source` or `AZAD_SOURCE`. This release needs a
+  checkout with `scripts/self-host/install-store.ts`.
 - macOS or Linux. On Windows, use WSL.
 
 ## Get the code
@@ -37,7 +38,7 @@ when you want to run it yourself.
 Download a release and check it:
 
 ```sh
-version=0.0.2
+version=0.1.0
 base="https://github.com/kodu-ai/azad-terraform/releases/download/v$version"
 curl -fsSLO "$base/azad-terraform-$version.tar.gz"
 curl -fsSLO "$base/azad-terraform-$version.tar.gz.sha256"
@@ -77,15 +78,17 @@ bun --no-env-file scripts/cloudflare.ts setup --database-provider postgres \
   --root postgres --instance-dir "$instance"
 bun --no-env-file scripts/cloudflare.ts init  --root postgres --instance-dir "$instance"
 bun --no-env-file scripts/cloudflare.ts plan  --root postgres --instance-dir "$instance" -out=terraform.tfplan
-# Read the plan. Happy with it? Apply exactly that plan:
-bun --no-env-file scripts/cloudflare.ts apply --root postgres --instance-dir "$instance" terraform.tfplan
+# Read the plan. Happy with it? Apply exactly that plan, then deploy the app:
+bun --no-env-file scripts/cloudflare.ts apply  --root postgres --instance-dir "$instance" terraform.tfplan
+bun --no-env-file scripts/cloudflare.ts deploy --root postgres --instance-dir "$instance"
 ```
 
 A few things worth knowing:
 
 - `setup` only reads (your Cloudflare account and zones, your GitHub App,
   Clerk's DNS targets) and writes `terraform/<root>/terraform.tfvars.json`
-  once. It also adds a few derived keys to your `.env`, including a generated
+  once. `init` creates the installation's R2 bucket for its state. `apply`
+  creates the infrastructure; `deploy` installs the app on it. It also adds a few derived keys to your `.env`, including a generated
   `GITHUB_WEBHOOK_SECRET`: paste that into your GitHub App's webhook settings.
 - If your token can see more than one Cloudflare account, add `--account-id`.
 - Cloud SQL: setup leaves the region at `me-central2`. To change it, add
@@ -113,12 +116,13 @@ bun --no-env-file scripts/gcp.ts apply --instance-dir "$instance" terraform.tfpl
 # A first install plans twice: the cluster first, then everything else.
 bun --no-env-file scripts/gcp.ts plan  --instance-dir "$instance" -out=terraform.tfplan
 bun --no-env-file scripts/gcp.ts apply --instance-dir "$instance" terraform.tfplan
+bun --no-env-file scripts/gcp.ts deploy --instance-dir "$instance"
 ```
 
 Your Cloudflare account ID is the 32-character ID in the dashboard's URL.
 Add `--evaluation` for a cheap throwaway install (Spot nodes, the smallest
-database, and a destroy that removes everything). The second apply takes about
-half an hour. The details, including disk backups and an agent machine, are
+database, and a destroy that removes everything). The second apply and the
+deploy take about half an hour together. The details, including disk backups and an agent machine, are
 in [docs/google-cloud.md](docs/google-cloud.md).
 
 ## What you provide
@@ -130,7 +134,7 @@ are the ones you'll actually touch.
 
 | Name | Required? | What it's for | Example |
 | --- | --- | --- | --- |
-| `AZAD_SOURCE` | Yes, unless you pass `--source` | The app checkout that `setup`, `refresh`, `plan`, `apply` and `destroy` deploy from | `~/src/azad` |
+| `AZAD_SOURCE` | Yes, unless you pass `--source` | The app checkout that `setup`, `refresh`, `plan`, `apply`, `deploy`, `destroy` and `backup-keys` use, and `init` while it moves a 0.0.x local state | `~/src/azad` |
 | Google credentials | Cloud SQL and Google Cloud | Application Default Credentials for Terraform and the deploy | `gcloud auth application-default login` |
 
 Don't export `CLOUDFLARE_API_TOKEN`: the drivers read it from the instance's
@@ -162,40 +166,83 @@ Don't export `CLOUDFLARE_API_TOKEN`: the drivers read it from the instance's
 
 ## Where your state lives
 
-Everything an installation owns sits in its instance directory:
+An installation keeps its state in its own cloud, in one private bucket that
+`init` creates:
+
+- **Cloudflare:** the R2 bucket `<resource prefix>-install` in your account.
+  Terraform's state is `terraform/<root>.tfstate`, locked while a command
+  runs. The app's keys (`secrets` and `release-key`) and settings live in the
+  account's [Secrets Store](https://developers.cloudflare.com/secrets-store/),
+  readable only by a Worker bound to them.
+- **Google Cloud:** the GCS bucket `<name>-<project hash>-install` in your
+  project, versioned. The keys live in the project's Secret Manager.
+
+The bucket also holds the app's install state (`install/`): what release runs,
+the Agent Connect release it mirrored, and the operation record that lets
+only one change run at a time. The instance directory is a cache:
 
 ```text
 ~/.azad/instances/<name>/
   .env                       your settings and secrets
   terraform/<root>/
     terraform.tfvars.json    what setup wrote
-    terraform.tfstate        Terraform's state (a local backend)
+    backend.tfbackend        the state bucket (init writes it, with backend.json)
     *.tfplan                 saved plans
-    installer-state/         Cloudflare: the app's keys and state
-    celld-install/           Google Cloud: the app's keys, tools and install.log
+    installer-state/         Cloudflare: the deploy's copy of the keys and receipt
+    celld-install/           Google Cloud: the same, plus tools and install.log
 ```
 
-Back the whole directory up and keep it private: it holds passwords and the
-keys that decrypt your data, and updates need it. This repo and the app
-checkout are just code; any copy of the same release can drive the
-installation. Use the drivers rather than plain `terraform`, which doesn't
-know where this state is. More in [docs/how-it-works.md](docs/how-it-works.md).
+Keep it private: it holds passwords and the keys that decrypt your data. Keep
+an offline copy of the keys too; on Cloudflare only the installation's own
+Worker can read them back from the Secrets Store:
+
+```sh
+bun --no-env-file scripts/cloudflare.ts backup-keys --root postgres --instance-dir "$instance" --out ~/azad-keys-backup
+```
+
+Use the drivers rather than plain `terraform`, which doesn't know where this
+state is. More in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Updating
 
-Pull the new app source, record its commit, then plan and apply as before:
+Pull the new app source, record its commit and deploy it:
 
 ```sh
 git -C "$AZAD_SOURCE" pull && bun install --frozen-lockfile --cwd "$AZAD_SOURCE"
 bun --no-env-file scripts/cloudflare.ts refresh --root postgres --instance-dir "$instance"
-bun --no-env-file scripts/cloudflare.ts init    --root postgres --instance-dir "$instance"
-bun --no-env-file scripts/cloudflare.ts plan    --root postgres --instance-dir "$instance" -out=terraform.tfplan
-bun --no-env-file scripts/cloudflare.ts apply   --root postgres --instance-dir "$instance" terraform.tfplan
+bun --no-env-file scripts/cloudflare.ts deploy  --root postgres --instance-dir "$instance"
 ```
 
-On Google Cloud it's the same with `scripts/gcp.ts` and no `--root`. Moving to
-a newer release of this repo? Download it, `bun install`, and run `init` from
-the new copy before you plan.
+On Google Cloud it's the same with `scripts/gcp.ts` and no `--root`. A deploy
+refuses a checkout older than what the installation already runs, so a stale
+checkout never puts an older release back. Terraform never deploys the app:
+`plan` and `apply` change infrastructure only, so run them when you change a
+setting in `terraform.tfvars.json` or move to a newer release of this repo
+(download it, `bun install`, and run `init` from the new copy first). Then
+`deploy`, which also applies changed settings from `.env`.
+
+### Moving from 0.0.x
+
+Releases before 0.1.0 kept Terraform's state in the instance directory. Run
+`init --source <app checkout>` from this release once: it creates the bucket, moves the state into it
+and keeps the old file as `terraform.tfstate.before-remote-<time>`. The next
+`plan` shows the old deploy resource leaving Terraform's state (nothing is
+destroyed), and `deploy` moves the keys and receipt into your cloud. On
+Cloudflare, the deployment token also needs **Secrets Store Edit** on the
+account: add it to the token in the Cloudflare dashboard first (its value
+stays the same).
+
+### One change at a time
+
+`apply`, `destroy`, `import`, the `state` commands that write, `deploy` and an
+`init` that moves a local state hold the installation's operation record
+while they run, so they never overlap each other or a release update. If a
+run was killed or a machine went away, its record stays: once you have
+confirmed that run and everything it started (such as a deploy still
+running) have stopped, pass `--take-over <operation id>` (the refusal names
+it). A deploy that failed keeps its revision: the next deploy must install
+that revision or a later one. Terraform's own state lock works the same way:
+after a killed run, `force-unlock <lock id>` releases it.
 
 ## Destroying
 
@@ -206,7 +253,8 @@ bun --no-env-file scripts/gcp.ts destroy --instance-dir "$instance"
 
 - On Cloudflare, destroy is a full uninstall: Workers, Pages, Hyperdrive, Mini
   Apps, and this installation's R2 buckets **with their files**. It keeps your
-  own database, your own bucket, the Clerk application and `installer-state/`.
+  own database, your own bucket, the Clerk application, the keys and the state
+  bucket.
 - Deletion protection is on by default for Cloud SQL, and on Google Cloud for
   the cluster, database and agent machine. It only keeps those: destroy still
   removes everything else first (on Google Cloud, that includes the in-cluster

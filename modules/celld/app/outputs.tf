@@ -1,10 +1,11 @@
-output "revision" {
-  description = "Revision the fleets were deployed from."
-  value       = terraform_data.deploy.triggers_replace.revision
+output "handoff" {
+  description = "AZAD_CELLD_INSTALL for scripts/self-host/celld-install.ts without its revision, which the drivers add. Holds the database and managed Git passwords."
+  sensitive   = true
+  value       = local.handoff
 }
 
 output "log" {
-  description = "Deploy progress log (Terraform hides the provisioner's output)."
+  description = "Deploy progress log the drivers' deploy appends to."
   value       = "${local.state_directory}/install.log"
 }
 

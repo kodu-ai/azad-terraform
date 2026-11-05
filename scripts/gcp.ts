@@ -10,17 +10,20 @@
  *   bun scripts/gcp.ts init --instance-dir DIR
  *   bun scripts/gcp.ts plan -out=NAME.tfplan --source APP_CHECKOUT --instance-dir DIR
  *   bun scripts/gcp.ts apply NAME.tfplan --source APP_CHECKOUT --instance-dir DIR
+ *   bun scripts/gcp.ts deploy --source APP_CHECKOUT --instance-dir DIR
  *   bun scripts/gcp.ts refresh | destroy ... --source APP_CHECKOUT --instance-dir DIR
  *   bun scripts/gcp.ts phase | output | show | state ... --instance-dir DIR
  *
  * `setup` reads the hostname's Cloudflare zone and Clerk's production CNAMEs
  * with the private credential file and writes the instance's
  * terraform.tfvars.json once. The credentials stay in that file: Terraform
- * gets CLOUDFLARE_API_TOKEN from it, and the deploy step (module.app) reads
- * it directly, so none of them enters Terraform state (the secrets Terraform
- * generates, such as the database password, do). Google access is
- * Application Default Credentials. State, variables, saved plans and the
- * deploy step's keys live in `DIR/terraform/gcp-celld/` (see ./instance.ts).
+ * gets CLOUDFLARE_API_TOKEN from it, and the deploy (`deploy`, which runs
+ * the app's celld-install.ts with module.app's handoff) reads it directly,
+ * so none of them enters Terraform state (the secrets Terraform generates,
+ * such as the database password, do). Google access is Application Default
+ * Credentials. Terraform's state lives in the installation's GCS bucket
+ * (see ./state.ts); variables, saved plans and the deploy's cache of the
+ * keys live in `DIR/terraform/gcp-celld/` (see ./instance.ts).
  *
  * A first install plans twice: everything but the cluster and Clerk's DNS
  * records is planned against the cluster's API, so the first plan (`phase`
@@ -41,9 +44,10 @@ import { z } from "zod"
 import { clerkDns, HELP, hostZones, SetupError } from "./cloudflare"
 import {
   appliesSavedPlan,
+  assertBackend,
   assertInitialized,
   assertInstancePaths,
-  assertLocalBackend,
+  changingPhase,
   forwardedArgs,
   instanceTerraform,
   InstanceError,
@@ -56,6 +60,17 @@ import {
   type InstanceTerraform,
 } from "./instance"
 import { readEnvFile, type Fetcher } from "./lib"
+import {
+  assertMoved,
+  configureBackend,
+  gcpStore,
+  installStore,
+  localState,
+  moveLocalState,
+  readBackendRecord,
+  withOperation,
+  type TerraformRun,
+} from "./state"
 import {
   requireSource,
   SettingsRefused,
@@ -115,6 +130,7 @@ const inputSchema = z.object({
 const varsSchema = z.looseObject({
   project_id: z.string(),
   region: z.string(),
+  name: z.string(),
   web_host: z.string(),
   deployment: z.looseObject({
     revision: z.string(),
@@ -241,45 +257,11 @@ function readVars(files: InstanceTerraform) {
   return vars
 }
 
-/**
- * Runs Terraform in the root against the instance's state and working data,
- * with the deployment token from the credential file and, when the command
- * has one, the app source checkout (`source_dir`).
- */
-function terraform(
-  files: InstanceTerraform,
-  args: string[],
-  token: string,
-  source: Source | undefined
-): number {
-  const result = Bun.spawnSync(["terraform", `-chdir=${files.root}`, ...args], {
-    env: {
-      ...process.env,
-      ...terraformEnvironment(files),
-      CLOUDFLARE_API_TOKEN: token,
-      ...(source
-        ? { TF_VAR_source_dir: source.path, AZAD_SOURCE: source.path }
-        : {}),
-    },
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  })
-  return result.exitCode
-}
-
-/** Resource addresses in the instance's state; empty before the first apply. */
-function stateAddresses(files: InstanceTerraform): string[] {
-  const result = Bun.spawnSync(
-    ["terraform", `-chdir=${files.root}`, "state", "list"],
-    {
-      env: { ...process.env, ...terraformEnvironment(files) },
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  )
-  if (result.exitCode !== 0) return []
-  return result.stdout.toString().split("\n").filter(Boolean)
+/** Resource addresses in the installation's state; empty before the first apply. */
+function stateAddresses(terraform: TerraformRun): string[] {
+  const result = terraform(["state", "list"], { capture: true })
+  if (result.status !== 0) return []
+  return result.stdout.split("\n").filter(Boolean)
 }
 
 /** True once the cluster is in state; the Kubernetes provider is configured from it. */
@@ -297,19 +279,27 @@ const TERRAFORM_COMMANDS = [
   "output",
   "show",
   "state",
+  "force-unlock",
 ]
-/** Commands that deploy, uninstall or validate the app: they need its source checkout. */
+/**
+ * Commands that deploy or validate the app, or hold the installation's
+ * operation record (through the app's install-store.ts): they need its
+ * source checkout.
+ */
 const SOURCE_COMMANDS = new Set([
   "setup",
   "refresh",
   "plan",
   "apply",
   "destroy",
+  "deploy",
+  "backup-keys",
 ])
 const USAGE = `Usage: gcp.ts setup --credentials FILE --project-id ID --region REGION --web-host HOST --account-id ID [--evaluation] [--disk-backups hourly|daily|weekly|off] [--agent-machine TYPE|none] --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld]
-       gcp.ts refresh|plan|apply|destroy --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld] [terraform arguments]
-       gcp.ts phase|init|output|show|state --instance-dir DIR [--root gcp-celld] [terraform arguments]
---source may instead come from AZAD_SOURCE.`
+       gcp.ts refresh|plan|apply|destroy|deploy --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld] [--take-over OPERATION] [terraform arguments]
+       gcp.ts backup-keys --out NEW_DIR --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld]
+       gcp.ts phase|init|output|show|state|force-unlock --instance-dir DIR [--root gcp-celld] [terraform arguments]
+--source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init while it moves a 0.0.x local state.`
 
 async function main() {
   const [command, ...args] = process.argv.slice(2)
@@ -331,8 +321,12 @@ async function main() {
       root: { type: "string", default: ROOT_NAMES[0] },
       source: { type: "string" },
       "instance-dir": { type: "string" },
+      "take-over": { type: "string" },
+      out: { type: "string" },
     },
-    strict: ["setup", "refresh", "phase"].includes(command),
+    strict: ["setup", "refresh", "phase", "deploy", "backup-keys"].includes(
+      command
+    ),
     allowPositionals: true,
   })
   const options = z
@@ -350,10 +344,21 @@ async function main() {
       root: z.string().default(ROOT_NAMES[0]),
       source: z.string().optional(),
       "instance-dir": z.string().optional(),
+      "take-over": z.string().optional(),
+      out: z.string().optional(),
     })
     .loose()
     .parse(parsed.values)
-  if (!["setup", "refresh", "phase", ...TERRAFORM_COMMANDS].includes(command))
+  if (
+    ![
+      "setup",
+      "refresh",
+      "phase",
+      "deploy",
+      "backup-keys",
+      ...TERRAFORM_COMMANDS,
+    ].includes(command)
+  )
     throw new SetupError(`${USAGE}\nNo operation runs by default.`)
   if (!options["instance-dir"])
     throw new SetupError(
@@ -363,11 +368,15 @@ async function main() {
     options["instance-dir"],
     rootNamed(options.root, ROOT_NAMES)
   )
-  assertLocalBackend(files.root)
+  assertBackend(files)
   // The source is checked before anything is read from the network or written.
-  const source = SOURCE_COMMANDS.has(command)
-    ? requireSource(options.source)
-    : undefined
+  // init needs it only to move a local state, under the operation record.
+  const source =
+    SOURCE_COMMANDS.has(command) ||
+    changingPhase(command, forwardedArgs(args)) !== undefined ||
+    (command === "init" && localState(files) !== undefined)
+      ? requireSource(options.source)
+      : undefined
   const commandLine = (name: string) =>
     `${DRIVER} ${name} --instance-dir ${files.instance}`
   if (command === "setup") {
@@ -441,70 +450,218 @@ async function main() {
   const token = readEnvFile(vars.deployment.env_file).CLOUDFLARE_API_TOKEN
   if (!token?.trim())
     throw new SetupError("The credential file needs CLOUDFLARE_API_TOKEN.")
+  const store = gcpStore(vars.name, vars.project_id)
+  const initCommand = commandLine("init")
+  const forwardedRaw = forwardedArgs(args)
+  // Set for a plan before the installation's first deploy (see the root's
+  // first_deploy_pending).
+  let firstDeployPending = false
+  const terraform: TerraformRun = (terraformArgs, run = {}) => {
+    const result = Bun.spawnSync(
+      ["terraform", `-chdir=${files.root}`, ...terraformArgs],
+      {
+        env: {
+          ...process.env,
+          ...terraformEnvironment(files),
+          CLOUDFLARE_API_TOKEN: token,
+          TF_VAR_first_deploy_pending: String(firstDeployPending),
+        },
+        stdin: "inherit",
+        stdout: run.capture ? "pipe" : "inherit",
+        stderr: "inherit",
+      }
+    )
+    return {
+      // Terraform stopped by a signal has no exit code; that is a failure.
+      status: result.exitCode ?? 1,
+      stdout: run.capture ? (result.stdout?.toString() ?? "") : "",
+    }
+  }
+  const app =
+    source &&
+    installStore(source, {
+      store,
+      kind: "celld",
+      env_file: vars.deployment.env_file,
+      state_directory: vars.deployment.state_directory,
+    })
   if (command === "init") {
     mkdirSync(files.directory, { recursive: true, mode: 0o700 })
-    process.exitCode = terraform(
-      files,
-      ["init", ...terraformArguments("init", forwardedArgs(args), files)],
-      token,
-      undefined
+    await configureBackend(files, store, { token, location: vars.region })
+    let status = terraform([
+      "init",
+      ...terraformArguments("init", forwardedRaw, files),
+    ]).status
+    if (status === 0 && app && localState(files)) {
+      let kept: string | undefined
+      status = withOperation(
+        app,
+        "terraform-state-move",
+        { takeOver: options["take-over"] },
+        () => {
+          kept = moveLocalState(files, terraform)
+          return 0
+        }
+      )
+      if (kept)
+        process.stdout.write(
+          `Moved this installation's Terraform state into the GCS bucket ${store.bucket}; the local copy is kept as ${kept}.\n`
+        )
+    }
+    process.exitCode = status
+    return
+  }
+  readBackendRecord(files, initCommand)
+  assertInitialized(files, store.bucket, initCommand)
+  // force-unlock stays possible: a move that crashed may hold Terraform's lock.
+  if (command !== "force-unlock") assertMoved(files, initCommand)
+  /** The full installer handoff: Terraform's output, the revision and where state lives. */
+  const handoff = (lease: string) => {
+    const deploy = deployOutput(terraform)
+    if (!deploy)
+      throw new SetupError(
+        "This installation has no deployment: its variables set none."
+      )
+    const held = z
+      .object({ id: z.string(), version: z.string() })
+      .parse(JSON.parse(lease))
+    return {
+      ...deploy,
+      // This machine's files: the output names those of the last apply.
+      env_file: vars.deployment.env_file,
+      state_directory: vars.deployment.state_directory,
+      revision: vars.deployment.revision,
+      install_store: store,
+      operation_id: held.id,
+      operation_version: held.version,
+    }
+  }
+  if (command === "backup-keys") {
+    if (!options.out || !app) throw new SetupError(USAGE)
+    process.stdout.write(
+      `Wrote secrets.json and release-key.pem to ${app.backup(options.out)}. Keep it offline: these keys decrypt the installation's data.\n`
     )
     return
   }
-  assertInitialized(files, commandLine("init"))
-  const addresses = stateAddresses(files)
+  if (command === "deploy") {
+    if (!app || !source) throw new SetupError(USAGE)
+    process.exitCode = withOperation(
+      app,
+      "deploy",
+      { takeOver: options["take-over"], revision: vars.deployment.revision },
+      (lease) => {
+        const input = handoff(lease)
+        app.publish(lease, JSON.stringify(input), REPOSITORY)
+        // The deploy's progress also goes to <state_directory>/install.log.
+        return Bun.spawnSync(
+          [
+            "/bin/bash",
+            "-o",
+            "pipefail",
+            "-c",
+            'umask 077 && mkdir -p "$AZAD_CELLD_STATE" && "$BUN" --no-env-file scripts/self-host/celld-install.ts 2>&1 | tee -a "$AZAD_CELLD_STATE/install.log"',
+          ],
+          {
+            cwd: source.path,
+            env: {
+              ...process.env,
+              BUN: process.execPath,
+              AZAD_CELLD_STATE: vars.deployment.state_directory,
+              AZAD_CELLD_INSTALL: JSON.stringify(input),
+            },
+            stdin: "inherit",
+            stdout: "inherit",
+            stderr: "inherit",
+          }
+        ).exitCode
+      }
+    )
+    return
+  }
+  const addresses = stateAddresses(terraform)
   if (command === "phase") {
     // Read by the installer: which plan comes next.
     process.stdout.write(`${clusterExists(addresses) ? "full" : "cluster"}\n`)
     return
   }
-  const forwarded = terraformArguments(command, forwardedArgs(args), files)
+  const forwarded = terraformArguments(command, forwardedRaw, files)
   const plan = command === "plan" ? planOutput(forwarded) : undefined
   // A failed plan must never leave an older plan where the apply looks.
   if (plan) rmSync(plan, { force: true })
+  const run = (work: () => number) => {
+    const phase = changingPhase(command, forwardedRaw)
+    if (!phase || !app) return work()
+    return withOperation(
+      app,
+      phase,
+      { takeOver: options["take-over"] },
+      (lease) => {
+        const status = work()
+        // The deployment object tells release updates what this infrastructure
+        // provides; it is written after every apply that completes it.
+        if (status === 0 && command === "apply" && deployOutput(terraform))
+          app.publish(lease, JSON.stringify(handoff(lease)), REPOSITORY)
+        return status
+      }
+    )
+  }
   if (command === "destroy" && addresses.length && !clusterExists(addresses)) {
     // A destroy that stopped after the cluster went cannot plan the Kubernetes
     // resources any more; it finishes what is left in state.
     process.stdout.write(
       "The cluster is already gone; destroying the remaining resources.\n"
     )
-    process.exitCode = terraform(
-      files,
-      [
-        command,
-        ...addresses.map((address) => `-target=${address}`),
-        ...forwarded,
-      ],
-      token,
-      source
+    process.exitCode = run(
+      () =>
+        terraform([
+          command,
+          ...addresses.map((address) => `-target=${address}`),
+          ...forwarded,
+        ]).status
     )
     return
   }
-  if (
-    (command === "plan" ||
-      (command === "apply" && !appliesSavedPlan(command, forwarded))) &&
-    !clusterExists(addresses)
-  ) {
-    // Everything else plans against the cluster's API, so a first install
-    // creates the cluster on its own; a plan before that covers only it.
-    // Clerk's DNS records come along so Clerk can verify them meanwhile.
-    process.stdout.write(
-      command === "plan"
-        ? "The cluster does not exist yet: this plan (1 of 2) covers only the cluster and Clerk's DNS records. The full plan (2 of 2) follows once they are created.\n"
-        : "Creating the cluster and Clerk's DNS records first; everything else is planned against the cluster.\n"
-    )
-    const status = terraform(
-      files,
-      [command, "-target=module.gke", "-target=module.clerk_dns", ...forwarded],
-      token,
-      source
-    )
-    if (status !== 0 || command === "plan") {
-      process.exitCode = status
-      return
+  const plans =
+    command === "plan" ||
+    (command === "apply" && !appliesSavedPlan(command, forwarded))
+  // Until a deploy has recorded its receipt, the fleets may serve nothing, so
+  // DNS cannot wait for the load balancer's check. (An installation from
+  // azad 0.0.x gets its receipt into the store on its first apply here.)
+  // A direct apply before the cluster exists runs the full apply right after
+  // the cluster's, so the flag is set for both.
+  if (plans && app) firstDeployPending = !app.deployed()
+  process.exitCode = run(() => {
+    if (plans && !clusterExists(addresses)) {
+      // Everything else plans against the cluster's API, so a first install
+      // creates the cluster on its own; a plan before that covers only it.
+      // Clerk's DNS records come along so Clerk can verify them meanwhile.
+      process.stdout.write(
+        command === "plan"
+          ? "The cluster does not exist yet: this plan (1 of 2) covers only the cluster and Clerk's DNS records. The full plan (2 of 2) follows once they are created.\n"
+          : "Creating the cluster and Clerk's DNS records first; everything else is planned against the cluster.\n"
+      )
+      const status = terraform([
+        command,
+        "-target=module.gke",
+        "-target=module.clerk_dns",
+        ...forwarded,
+      ]).status
+      if (status !== 0 || command === "plan") return status
     }
-  }
-  process.exitCode = terraform(files, [command, ...forwarded], token, source)
+    return terraform([command, ...forwarded]).status
+  })
+}
+
+/** module.app's handoff once the full configuration is applied; undefined before (or without a deployment). */
+function deployOutput(terraform: TerraformRun) {
+  const result = terraform(["output", "-json", "deploy"], { capture: true })
+  if (result.status !== 0 || !result.stdout.trim()) return undefined
+  return (
+    z
+      .record(z.string(), z.json())
+      .nullable()
+      .parse(JSON.parse(result.stdout)) ?? undefined
+  )
 }
 
 if (import.meta.main) {

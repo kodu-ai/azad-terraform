@@ -1,7 +1,8 @@
 # Own-infrastructure composition on Google Cloud: celld fleets on GKE Autopilot
 # with state in GCS behind a regional GKE Gateway, Cloud SQL through the Cloud
-# SQL Auth Proxy, Cloudflare for DNS (and optionally its proxy), and the app
-# deployed by module.app. Both fleets use the cloud-neutral modules/celld/fleet.
+# SQL Auth Proxy, and Cloudflare for DNS (and optionally its proxy). The app
+# itself is deployed by `gcp.ts deploy` with module.app's handoff, never by a
+# plan. Both fleets use the cloud-neutral modules/celld/fleet.
 
 locals {
   api_host  = "api.${var.web_host}"
@@ -74,6 +75,9 @@ resource "terraform_data" "released_volumes" {
 locals {
   dns        = var.cloudflare_zone_id != null
   google_tls = local.dns && !var.cloudflare_proxy
+  # The address DNS uses: the checked load balancer, or before the first
+  # deploy the load balancer's address as it is.
+  origin_address = var.first_deploy_pending ? module.gke.ingress_address.address : one(terraform_data.load_balancer_ready[*].output)
   # Autopilot schedules these pods on amd64 nodes and taints by architecture.
   autopilot_tolerations = [{ key = "kubernetes.io/arch", value = "amd64", operator = "Equal", effect = "NoSchedule" }]
   node_principal        = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/azad/sa"
@@ -199,9 +203,10 @@ module "gateway" {
 # replaced Gateway keeps serving, so a new load balancer takes over without an
 # outage. Its output is the address the records use. The Gateway's name orders
 # it after the routes; depending on the whole module would also wait for the
-# replaced Gateway's removal, which waits for this check.
+# replaced Gateway's removal, which waits for this check. Before the first
+# deploy nothing can serve yet, so the records take the address directly.
 resource "terraform_data" "load_balancer_ready" {
-  count = local.dns ? 1 : 0
+  count = local.dns && !var.first_deploy_pending ? 1 : 0
   input = module.gke.ingress_address.address
   triggers_replace = [
     module.gke.ingress_address.address,
@@ -247,7 +252,7 @@ module "dns" {
   records = { for host in [var.web_host, local.api_host, local.apps_host] : host => {
     name    = host
     type    = "A"
-    content = terraform_data.load_balancer_ready[0].output
+    content = local.origin_address
   } }
 }
 
@@ -256,7 +261,7 @@ module "edge" {
   count           = local.dns && var.cloudflare_proxy ? 1 : 0
   zone_id         = var.cloudflare_zone_id
   hosts           = [var.web_host, local.api_host, local.apps_host]
-  origin_address  = terraform_data.load_balancer_ready[0].output
+  origin_address  = local.origin_address
   manage_ssl_rule = var.manage_ssl_rule
 }
 
@@ -383,13 +388,20 @@ data "google_compute_subnetwork" "cluster" {
   name    = basename(module.gke.network.subnetwork)
 }
 
-# The app itself: instance keys, migrations, the Agent Connect release mirror
-# and both bundles, deployed into the fleets once everything they need exists.
+# The installation's keys live in Secret Manager (written by the app's deploy,
+# never by Terraform), beside the state bucket the drivers create.
+resource "google_project_service" "secret_manager" {
+  project            = var.project_id
+  service            = "secretmanager.googleapis.com"
+  disable_on_destroy = false
+}
+
+# What `gcp.ts deploy` gives the app's deploy: instance keys, migrations, the
+# Agent Connect release mirror and both bundles, written into the fleets.
 module "app" {
   source     = "../../modules/celld/app"
   count      = var.deployment == null ? 0 : 1
   deployment = var.deployment
-  source_dir = var.source_dir
   fleets = {
     api = module.api.bucket
     web = module.web.bucket
@@ -415,14 +427,4 @@ module "app" {
     [data.google_compute_subnetwork.cluster.ip_cidr_range],
     var.ssh_allowed_private_cidrs,
   ))
-
-  depends_on = [
-    module.gke,
-    module.forgejo,
-    module.gateway,
-    module.dns,
-    module.edge,
-    module.clerk_dns,
-    google_project_iam_member.database_client,
-  ]
 }

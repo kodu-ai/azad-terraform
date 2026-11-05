@@ -1,5 +1,6 @@
-# The deploy and uninstall run the app's own entrypoints from its source
-# checkout. Plan-only: no provisioner runs.
+# The deploy runs outside Terraform with this module's handoff; the uninstall
+# runs the app's own entrypoint from its source checkout. Plan-only: no
+# provisioner runs.
 variables {
   cloudflare = {
     account_id = "00000000000000000000000000000000"
@@ -8,10 +9,8 @@ variables {
   }
   deployment = {
     env_file = "tests/fixtures/settings.env"
-    revision = "0000000000000000000000000000000000000000"
   }
   resource_prefix = "azad-api-board-example-com-7ec551c7"
-  database_url    = "postgresql://azad:fixture@db.example.com:5432/azad?sslmode=require"
   resources = {
     buckets    = { files = "azad-api-board-example-com-7ec551c7-files" }
     queue_id   = "fixture-queue"
@@ -34,21 +33,27 @@ run "the_uninstall_records_the_source_it_was_applied_from" {
   }
 }
 
-run "a_deploy_needs_the_source_checkout" {
-  command         = plan
-  expect_failures = [terraform_data.install]
+run "the_deploy_handoff_names_the_installation_without_credentials" {
+  command = plan
+  assert {
+    condition     = output.installer_input.resource_prefix == "azad-api-board-example-com-7ec551c7" && startswith(output.installer_input.env_file, "/")
+    error_message = "The deploy gets the installation's identity and absolute instance paths."
+  }
+  assert {
+    condition     = !contains(keys(output.installer_input), "database_url") && !contains(keys(output.installer_input), "revision")
+    error_message = "The driver adds the database URL and the revision; Terraform stores neither."
+  }
 }
 
 run "infrastructure_only_needs_no_source" {
   command = plan
   variables {
     deployment = {
-      enabled  = false
-      revision = "0000000000000000000000000000000000000000"
+      enabled = false
     }
   }
   assert {
-    condition     = length(terraform_data.install) == 0 && length(terraform_data.uninstall) == 0
-    error_message = "Without a deployment nothing runs from the source."
+    condition     = output.installer_input == null && length(terraform_data.uninstall) == 0
+    error_message = "Without a deployment nothing is deployed or uninstalled."
   }
 }
