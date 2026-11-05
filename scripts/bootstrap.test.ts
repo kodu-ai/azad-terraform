@@ -62,6 +62,7 @@ const groups = [
     scopes: ["com.cloudflare.api.account.zone"],
   })),
   { name: "Secrets Store Write", scopes: ["com.cloudflare.api.account"] },
+  { name: "Containers Write", scopes: ["com.cloudflare.api.account"] },
 ].map((group, i) => ({ ...group, id: (i + 1).toString(16).padStart(32, "0") }))
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "azad-token-bootstrap-"))
@@ -241,7 +242,7 @@ test("deployment and runtime grants stay in the selected account and exact disco
     [`com.cloudflare.api.account.zone.${zone}`]: "*",
   })
   expect(policies.deployment.policies[0].permission_groups).toEqual(
-    [1, 2, 3, 4, 5, 6, 16, 8].map((i) => ({
+    [1, 2, 3, 4, 5, 6, 16, 17, 8].map((i) => ({
       id: i.toString(16).padStart(32, "0"),
     }))
   )
