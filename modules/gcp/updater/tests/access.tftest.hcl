@@ -1,18 +1,13 @@
 mock_provider "google" {}
 mock_provider "kubernetes" {}
-mock_provider "random" {
-  mock_resource "random_id" {
-    defaults = { hex = "a1b2" }
-  }
-}
 
 variables {
-  project_id     = "customer-project"
-  project_number = "123456789012"
-  name           = "azad-board-1a2b"
-  namespace      = "azad"
-  image          = "ghcr.io/kodu-ai/azad-updater@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-  install_bucket = "azad-board-1a2b-1f2e3d4c-install"
+  project_id        = "customer-project"
+  project_number    = "123456789012"
+  database_instance = "azad-board-1a2b-db"
+  namespace         = "azad"
+  image             = "ghcr.io/kodu-ai/azad-updater@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  install_bucket    = "azad-board-1a2b-1f2e3d4c-install"
 }
 
 run "the_updater_reaches_only_the_apps_install_state" {
@@ -34,16 +29,24 @@ run "the_updater_reaches_only_the_apps_install_state" {
 run "the_updater_reads_only_this_installations_secrets" {
   command = plan
   assert {
-    condition     = google_project_iam_member.secrets.condition[0].expression == "resource.name.startsWith(\"projects/123456789012/secrets/azad-board-1a2b-1f2e3d4c-install-\")"
-    error_message = "Secret access is limited to the store's <bucket>-<name> secrets."
-  }
-  assert {
-    condition     = toset(google_project_iam_custom_role.secrets.permissions) == toset(["secretmanager.versions.access", "secretmanager.versions.list"])
+    condition     = toset(keys(google_project_iam_member.secrets)) == toset(["roles/secretmanager.viewer", "roles/secretmanager.secretAccessor"])
     error_message = "The updater lists and reads secret versions and never writes them."
   }
   assert {
-    condition     = toset(google_project_iam_custom_role.restore_point.permissions) == toset(["cloudsql.backupRuns.create", "cloudsql.backupRuns.get"]) && google_project_iam_member.database_client.role == "roles/cloudsql.client"
-    error_message = "Cloud SQL access is the proxy connection and the restore point's backup."
+    condition     = alltrue([for grant in google_project_iam_member.secrets : grant.condition[0].expression == "resource.name.startsWith(\"projects/123456789012/secrets/azad-board-1a2b-1f2e3d4c-install-\")"])
+    error_message = "Secret access is limited to the store's <bucket>-<name> secrets."
+  }
+}
+
+run "the_updater_backs_up_only_this_installations_database" {
+  command = plan
+  assert {
+    condition     = google_project_iam_member.restore_point.role == "roles/cloudsql.editor" && google_project_iam_member.restore_point.condition[0].expression == "resource.name == \"projects/customer-project/instances/azad-board-1a2b-db\""
+    error_message = "The restore point's backup reaches only the installation's instance."
+  }
+  assert {
+    condition     = google_project_iam_member.database_client.role == "roles/cloudsql.client"
+    error_message = "Migrations connect through the Cloud SQL Auth Proxy."
   }
 }
 

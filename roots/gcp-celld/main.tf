@@ -307,14 +307,14 @@ module "api" {
 # the installation's secrets, Cloud SQL and the fleets. An update never runs
 # Terraform; infrastructure changes stay with the CLI.
 module "updater" {
-  source         = "../../modules/gcp/updater"
-  count          = local.updater ? 1 : 0
-  project_id     = var.project_id
-  project_number = data.google_project.current.number
-  name           = var.name
-  namespace      = kubernetes_namespace_v1.azad.metadata[0].name
-  image          = var.updater_image
-  install_bucket = var.install_bucket
+  source            = "../../modules/gcp/updater"
+  count             = local.updater ? 1 : 0
+  project_id        = var.project_id
+  project_number    = data.google_project.current.number
+  database_instance = module.database.connection.instance
+  namespace         = kubernetes_namespace_v1.azad.metadata[0].name
+  image             = var.updater_image
+  install_bucket    = var.install_bucket
 }
 
 module "web" {

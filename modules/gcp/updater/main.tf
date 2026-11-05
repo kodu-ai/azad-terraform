@@ -18,7 +18,7 @@ locals {
   # The store's secrets are <bucket>-<name> (secrets, release-key, settings,
   # handoff, relay); Secret Manager names them by project number.
   install_secrets = "resource.name.startsWith(\"projects/${var.project_number}/secrets/${var.install_bucket}-\")"
-  role_prefix     = replace(var.name, "-", "_")
+  database        = "resource.name == \"projects/${var.project_id}/instances/${var.database_instance}\""
 }
 
 resource "kubernetes_service_account_v1" "updater" {
@@ -36,24 +36,15 @@ resource "kubernetes_service_account_v1" "updater" {
   automount_service_account_token = false
 }
 
-# A deleted custom role keeps its ID for weeks, so a reinstall needs new ones.
-resource "random_id" "roles" {
-  byte_length = 2
-}
-
-# Reads one secret's enabled versions, then the version's value: the store
-# lists before it accesses. It never writes secrets.
-resource "google_project_iam_custom_role" "secrets" {
-  project     = var.project_id
-  role_id     = "${local.role_prefix}_updater_secrets_${random_id.roles.hex}"
-  title       = "Azad updater: read the installation's secrets"
-  permissions = ["secretmanager.versions.access", "secretmanager.versions.list"]
-}
-
+# Reads one secret's enabled versions (Secret Manager Viewer), then the
+# version's value (Secret Accessor): the store lists before it accesses. It
+# never writes secrets. Predefined roles only, so the documented installer
+# permissions (Editor plus Project IAM Admin) can grant them.
 resource "google_project_iam_member" "secrets" {
-  project = var.project_id
-  role    = google_project_iam_custom_role.secrets.name
-  member  = local.updater
+  for_each = toset(["roles/secretmanager.viewer", "roles/secretmanager.secretAccessor"])
+  project  = var.project_id
+  role     = each.value
+  member   = local.updater
   condition {
     title       = "azad-install-secrets"
     description = "Only this installation's secrets."
@@ -92,19 +83,18 @@ resource "google_project_iam_member" "database_client" {
 }
 
 # The restore point: an on-demand backup taken, and read back, before an
-# update changes the database (backupRuns insert and get; the instance and
-# its operations are read with cloudsql.client's cloudsql.instances.get).
-resource "google_project_iam_custom_role" "restore_point" {
-  project     = var.project_id
-  role_id     = "${local.role_prefix}_updater_backups_${random_id.roles.hex}"
-  title       = "Azad updater: take a restore point"
-  permissions = ["cloudsql.backupRuns.create", "cloudsql.backupRuns.get"]
-}
-
+# update changes the database (backupRuns insert and get). Cloud SQL Editor
+# is the narrowest predefined role with them, limited to this installation's
+# instance; it cannot delete the instance or its backups.
 resource "google_project_iam_member" "restore_point" {
   project = var.project_id
-  role    = google_project_iam_custom_role.restore_point.name
+  role    = "roles/cloudsql.editor"
   member  = local.updater
+  condition {
+    title       = "azad-install-database"
+    description = "Only this installation's Cloud SQL instance."
+    expression  = local.database
+  }
 }
 
 # The starter's Kubernetes access, through the API pods' service account:

@@ -12,8 +12,8 @@ variable "project_number" {
   }
 }
 
-variable "name" {
-  description = "Installation name prefix (the root's var.name); custom role IDs derive from it."
+variable "database_instance" {
+  description = "The installation's Cloud SQL instance, the only one the updater may back up."
   type        = string
 }
 
