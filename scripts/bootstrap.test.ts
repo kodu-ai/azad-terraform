@@ -62,7 +62,7 @@ const groups = [
     scopes: ["com.cloudflare.api.account.zone"],
   })),
   { name: "Secrets Store Write", scopes: ["com.cloudflare.api.account"] },
-  { name: "Containers Write", scopes: ["com.cloudflare.api.account"] },
+  { name: "Workers Containers Write", scopes: ["com.cloudflare.api.account"] },
 ].map((group, i) => ({ ...group, id: (i + 1).toString(16).padStart(32, "0") }))
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "azad-token-bootstrap-"))

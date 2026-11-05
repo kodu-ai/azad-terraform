@@ -184,7 +184,7 @@ Cloudflare's dashboard calls the API's "Write" permissions "Edit".
 
 - **Azad on Cloudflare:** Account: Account Settings Read, Workers Scripts
   Edit, Workers R2 Storage Edit, Queues Edit, Hyperdrive Edit, Cloudflare
-  Pages Edit, Secrets Store Edit (the instance keys) and Containers Edit (the
+  Pages Edit, Secrets Store Edit (the instance keys) and Workers Containers Edit (the
   updater's Container, for release updates from the console). R2 also holds
   Terraform's state, reached with this token's S3 credentials. Zone (the zones of your hostnames): Zone Read, DNS Edit and
   Workers Routes Edit. With `sslmode=verify-full`, also Account: SSL and

@@ -114,7 +114,7 @@ const deploymentAccountGroups = [
   "Secrets Store Write",
   // Console release updates: the deploy pushes the updater image into the
   // account's container registry and creates the updater's Container.
-  "Containers Write",
+  "Workers Containers Write",
 ]
 
 function permission(groups: Group[], name: string, scope: string) {

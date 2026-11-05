@@ -200,7 +200,7 @@ runs, and `azad update` keeps working beside it. The deploy copies the pinned
 updater image into the account's container registry and deploys the
 installation's updater Worker, which runs each update in a Cloudflare
 Container. Containers need the Workers Paid plan, and the deployment token
-needs Containers Edit ([INPUTS.md](../INPUTS.md#the-cloudflare-api-token)).
+needs Workers Containers Edit ([INPUTS.md](../INPUTS.md#the-cloudflare-api-token)).
 The keys and deploy credentials are bound to the updater Worker only; the API
 gets a binding that can start an update and read its status. An update never
 runs Terraform: a release that needs new infrastructure asks you to run the

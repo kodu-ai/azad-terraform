@@ -229,7 +229,7 @@ Container on Cloudflare, a Kubernetes Job on Google Cloud
 ([docs/cloudflare.md](docs/cloudflare.md#release-updates-from-the-console),
 [docs/google-cloud.md](docs/google-cloud.md#release-updates-from-the-console)).
 These updates never run Terraform. On Cloudflare the deployment token also
-needs **Containers Edit**, and the account the Workers Paid plan.
+needs **Workers Containers Edit**, and the account the Workers Paid plan.
 
 ### Moving from 0.0.x
 
