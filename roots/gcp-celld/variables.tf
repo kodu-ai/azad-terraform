@@ -156,9 +156,9 @@ variable "ssh_allowed_private_cidrs" {
 
 
 variable "updater_image" {
-  description = "The updater image, pinned by digest (ghcr.io/kodu-ai/azad-updater@sha256:...), which turns on release updates from the console: the API pods get a starter sidecar that runs each update as a Kubernetes Job in this cluster. The azad CLI release that pins the image sets it. Null keeps updates to the CLI (`azad update`)."
+  description = "The updater image, pinned by digest (ghcr.io/kodu-ai/azad-updater@sha256:...), which turns on release updates from the console: the API pods get a starter sidecar that runs each update as a Kubernetes Job in this cluster. The default is the image azad 0.2.0 published. Null keeps updates to the CLI (`azad update`)."
   type        = string
-  default     = null
+  default     = "ghcr.io/kodu-ai/azad-updater@sha256:3959ed459010390940e6e9b6a151baeef3cccf42cd1be00553fab18918bb77ca"
   validation {
     condition     = var.updater_image == null || can(regex("^ghcr\\.io/kodu-ai/azad-updater@sha256:[a-f0-9]{64}$", var.updater_image))
     error_message = "Use ghcr.io/kodu-ai/azad-updater@sha256:<digest>, or null."

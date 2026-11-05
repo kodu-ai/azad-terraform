@@ -194,7 +194,7 @@ to retry a deployment: they decrypt the data in the database.
 
 ### Release updates from the console
 
-With `updater_image` set (the `azad` CLI release that pins the image sets it),
+With `updater_image` set (off by default on Cloudflare: set it to the image azad 0.2.0 published, `ghcr.io/kodu-ai/azad-updater@sha256:3959ed459010390940e6e9b6a151baeef3cccf42cd1be00553fab18918bb77ca`),
 an admin can update the installation from its settings to a release azad.pro
 runs, and `azad update` keeps working beside it. The deploy copies the pinned
 updater image into the account's container registry and deploys the

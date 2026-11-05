@@ -223,7 +223,7 @@ setting in `terraform.tfvars.json` or move to a newer release of this repo
 
 ### From the console
 
-With `updater_image` set (the `azad` CLI sets it), an admin can also update
+With `updater_image` set (the default on Google Cloud; on Cloudflare you set it), an admin can also update
 to a release azad.pro runs from the installation's settings: a Cloudflare
 Container on Cloudflare, a Kubernetes Job on Google Cloud
 ([docs/cloudflare.md](docs/cloudflare.md#release-updates-from-the-console),

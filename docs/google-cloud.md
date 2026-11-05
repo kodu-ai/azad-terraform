@@ -141,7 +141,7 @@ redeploy the same revision, deploy again.
 
 ### Release updates from the console
 
-With `updater_image` set (the `azad` CLI release that pins the image sets it),
+With `updater_image` set (the default: the image azad 0.2.0 published),
 an admin can update the installation from its settings to a release azad.pro
 runs, and `azad update` keeps working beside it. Each update runs as a one-off
 Kubernetes Job in the `azad` namespace with the pinned updater image. It
