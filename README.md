@@ -38,7 +38,7 @@ when you want to run it yourself.
 Download a release and check it:
 
 ```sh
-version=0.2.0
+version=0.2.1
 base="https://github.com/kodu-ai/azad-terraform/releases/download/v$version"
 curl -fsSLO "$base/azad-terraform-$version.tar.gz"
 curl -fsSLO "$base/azad-terraform-$version.tar.gz.sha256"

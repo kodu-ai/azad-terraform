@@ -11,6 +11,11 @@ module "database" {
 
   settings = merge(var.gcp, {
     instance_name = coalesce(var.gcp.instance_name, "azad-${substr(sha256(var.cloudflare.api_origin), 0, 12)}")
+    # Hyperdrive keeps its pooled connections open for a while after the
+    # uninstall deletes it, and Cloud SQL will not drop a database that still
+    # has clients. Deleting the instance removes the database and user with it;
+    # with deletion protection on, both stay in the kept instance.
+    deletion_policy = "ABANDON"
   })
   password = var.database_password == null ? random_password.database[0].result : var.database_password
 }
