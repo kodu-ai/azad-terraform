@@ -13,8 +13,7 @@ variables {
     web_origin = "https://board.example.com"
   }
   deployment = {
-    enabled  = false
-    revision = "0000000000000000000000000000000000000000"
+    enabled = false
   }
 }
 run "current_storage" {
@@ -29,7 +28,6 @@ run "same_installer_handoff" {
   variables {
     deployment = {
       env_file = "tests/fixtures/settings.env"
-      revision = "0000000000000000000000000000000000000000"
     }
   }
 }
@@ -96,7 +94,6 @@ run "own_bucket_replaces_r2" {
     }
     deployment = {
       env_file = "tests/fixtures/settings.env"
-      revision = "0000000000000000000000000000000000000000"
     }
   }
   assert {
@@ -114,7 +111,6 @@ run "uninstall_empties_only_owned_r2_buckets" {
   variables {
     deployment = {
       env_file = "tests/fixtures/settings.env"
-      revision = "0000000000000000000000000000000000000000"
     }
   }
   assert {

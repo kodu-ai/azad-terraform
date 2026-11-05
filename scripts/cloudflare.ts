@@ -14,9 +14,10 @@ import { parse } from "dotenv"
 import { z } from "zod"
 import { NEON_DATABASE_CA, neonCaPem } from "./database-ca"
 import {
+  assertBackend,
   assertInitialized,
   assertInstancePaths,
-  assertLocalBackend,
+  changingPhase,
   forwardedArgs,
   instanceTerraform,
   InstanceError,
@@ -30,6 +31,16 @@ import {
   type InstanceTerraform,
 } from "./instance"
 import { readEnvFile, type Fetcher } from "./lib"
+import {
+  backendEnvironment,
+  cloudflareStore,
+  configureBackend,
+  installStore,
+  moveLocalState,
+  readBackendRecord,
+  withOperation,
+  type TerraformRun,
+} from "./state"
 import {
   requireSource,
   SettingsRefused,
@@ -632,6 +643,7 @@ export function saveCloudflare(
 
 const varsSchema = z.looseObject({
   database_ca: z.literal(NEON_DATABASE_CA).optional(),
+  cloudflare: z.looseObject({ account_id: z.string(), api_origin: z.string() }),
   deployment: z.looseObject({
     env_file: z.string(),
     revision: z.string(),
@@ -660,21 +672,30 @@ const TERRAFORM_COMMANDS = [
   "state",
   "import",
   "console",
+  "force-unlock",
 ]
-/** Commands that deploy, uninstall or validate the app: they need its source checkout. */
+/**
+ * Commands that deploy, uninstall or validate the app, or hold the
+ * installation's operation record (through the app's install-store.ts):
+ * they need its source checkout.
+ */
 const SOURCE_COMMANDS = new Set([
   "setup",
   "refresh",
   "plan",
   "apply",
   "destroy",
+  "deploy",
+  "backup-keys",
+  "import",
 ])
 /** Commands that evaluate the configuration: they pass a source checkout on when given one. */
-const OPTIONAL_SOURCE_COMMANDS = new Set(["validate", "import", "console"])
+const OPTIONAL_SOURCE_COMMANDS = new Set(["validate", "console"])
 const USAGE = `Usage: cloudflare.ts setup --database-provider cloudsql|postgres [--project-id ID] --web-host board.example.com --credentials PRIVATE_ENV [--account-id ID] [--runner-cidr CIDR] [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR
-       cloudflare.ts refresh|plan|apply|destroy [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR [terraform arguments]
-       cloudflare.ts init|output|show|state|validate|import|console [--root cloudsql|postgres] --instance-dir DIR [terraform arguments]
---source may instead come from AZAD_SOURCE.`
+       cloudflare.ts refresh|plan|apply|destroy|deploy|import [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR [--take-over OPERATION] [terraform arguments]
+       cloudflare.ts backup-keys --out NEW_DIR [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR
+       cloudflare.ts init|output|show|state|validate|console|force-unlock [--root cloudsql|postgres] --instance-dir DIR [terraform arguments]
+--source may instead come from AZAD_SOURCE. state mv|rm|push also needs it.`
 
 /** Arguments that print the usage instead of running a command. */
 export const HELP = new Set(["--help", "-h", "help"])
@@ -697,8 +718,10 @@ async function main() {
       root: { type: "string", default: "cloudsql" },
       source: { type: "string" },
       "instance-dir": { type: "string" },
+      "take-over": { type: "string" },
+      out: { type: "string" },
     },
-    strict: ["setup", "refresh"].includes(command),
+    strict: ["setup", "refresh", "deploy", "backup-keys"].includes(command),
     allowPositionals: true,
   })
   const options = z
@@ -712,9 +735,19 @@ async function main() {
       root: z.string().default("cloudsql"),
       source: z.string().optional(),
       "instance-dir": z.string().optional(),
+      "take-over": z.string().optional(),
+      out: z.string().optional(),
     })
     .parse(parsed.values)
-  if (!["setup", "refresh", ...TERRAFORM_COMMANDS].includes(command))
+  if (
+    ![
+      "setup",
+      "refresh",
+      "deploy",
+      "backup-keys",
+      ...TERRAFORM_COMMANDS,
+    ].includes(command)
+  )
     throw new SetupError(`${USAGE}\nNo operation runs by default.`)
   if (!options["instance-dir"])
     throw new SetupError(
@@ -724,10 +757,11 @@ async function main() {
     options["instance-dir"],
     rootNamed(options.root, ROOT_NAMES)
   )
-  assertLocalBackend(files.root)
+  assertBackend(files)
   // The source is checked before anything is read from the network or written.
   const source: Source | undefined =
     SOURCE_COMMANDS.has(command) ||
+    changingPhase(command, forwardedArgs(args)) !== undefined ||
     (OPTIONAL_SOURCE_COMMANDS.has(command) &&
       sourceOption(options.source) !== undefined)
       ? requireSource(options.source)
@@ -817,38 +851,184 @@ async function main() {
   }
   const config = cloudflareVars(files)
   const env = readEnvFile(config.deployment.env_file)
-  if (!env.CLOUDFLARE_API_TOKEN?.trim())
+  const token = env.CLOUDFLARE_API_TOKEN?.trim()
+  if (!token)
     throw new SetupError(
       "The selected installer file needs CLOUDFLARE_API_TOKEN."
     )
-  if (command === "init")
+  const store = cloudflareStore(
+    config.cloudflare.account_id,
+    config.cloudflare.api_origin
+  )
+  const initCommand = commandLine("init")
+  const forwardedRaw = forwardedArgs(args)
+  // Without a record (before init) Terraform gets no backend credentials.
+  const record =
+    command === "init" ? undefined : readBackendRecord(files, initCommand)
+  const backendEnv = () =>
+    command === "init" || !record
+      ? {}
+      : backendEnvironment(record, token, initCommand)
+  let initRecord: Awaited<ReturnType<typeof configureBackend>> | undefined
+  const terraform: TerraformRun = (terraformArgs, run = {}) => {
+    const result = Bun.spawnSync(
+      ["terraform", `-chdir=${files.root}`, ...terraformArgs],
+      {
+        env: {
+          ...process.env,
+          CLOUDFLARE_API_TOKEN: token,
+          TF_VAR_database_url: env.DATABASE_URL ?? "",
+          TF_VAR_database_ca_pem:
+            config.database_ca &&
+            ["plan", "apply", "destroy"].includes(terraformArgs[0] ?? "")
+              ? neonCaPem()
+              : "",
+          ...(source
+            ? { TF_VAR_source_dir: source.path, AZAD_SOURCE: source.path }
+            : {}),
+          ...terraformEnvironment(files),
+          ...(initRecord
+            ? backendEnvironment(initRecord, token, initCommand)
+            : backendEnv()),
+        },
+        stdin: "inherit",
+        stdout: run.capture ? "pipe" : "inherit",
+        stderr: "inherit",
+      }
+    )
+    return {
+      status: result.exitCode,
+      stdout: run.capture ? (result.stdout?.toString() ?? "") : "",
+    }
+  }
+  if (command === "init") {
     mkdirSync(files.directory, { recursive: true, mode: 0o700 })
-  else assertInitialized(files, commandLine("init"))
-  const forwarded = terraformArguments(command, forwardedArgs(args), files)
+    initRecord = await configureBackend(files, store, { token })
+    const status = terraform([
+      "init",
+      ...terraformArguments("init", forwardedRaw, files),
+    ]).status
+    if (status === 0) {
+      const kept = moveLocalState(files, terraform)
+      if (kept)
+        process.stdout.write(
+          `Moved this installation's Terraform state into the R2 bucket ${store.bucket}; the local copy is kept as ${kept}.\n`
+        )
+    }
+    process.exitCode = status
+    return
+  }
+  assertInitialized(files, store.bucket, initCommand)
+  const app =
+    source &&
+    installStore(source, {
+      store,
+      kind: "cloudflare",
+      env_file: config.deployment.env_file,
+      state_directory: config.deployment.state_directory,
+    })
+  /** The full installer handoff: Terraform's outputs, the revision and the database URL. */
+  const handoff = (lease: string) => {
+    const outputs = terraformOutputs(terraform)
+    if (!outputs.deploy)
+      throw new SetupError(
+        "This installation has no deployment (deployment.enabled is false)."
+      )
+    return {
+      ...outputs.deploy,
+      revision: config.deployment.revision,
+      database_url: outputs.database_url ?? env.DATABASE_URL ?? "",
+      install_store: store,
+      operation_id: leaseId(lease),
+    }
+  }
+  if (command === "backup-keys") {
+    if (!options.out || !app) throw new SetupError(USAGE)
+    process.stdout.write(
+      `Wrote secrets.json and release-key.pem to ${app.backup(options.out)}. Keep it offline: these keys decrypt the installation's data.\n`
+    )
+    return
+  }
+  if (command === "deploy") {
+    if (!app || !source) throw new SetupError(USAGE)
+    process.exitCode = withOperation(
+      app,
+      "deploy",
+      options["take-over"],
+      (lease) => {
+        const input = handoff(lease)
+        app.publish(lease, JSON.stringify(input), REPOSITORY)
+        return Bun.spawnSync(
+          [
+            process.execPath,
+            "--no-env-file",
+            join(source.path, "scripts/self-host/cloudflare-install.ts"),
+            "install",
+          ],
+          {
+            cwd: source.path,
+            env: {
+              ...process.env,
+              AZAD_TERRAFORM_INSTALL: JSON.stringify(input),
+            },
+            stdin: "inherit",
+            stdout: "inherit",
+            stderr: "inherit",
+          }
+        ).exitCode
+      }
+    )
+    return
+  }
+  const forwarded = terraformArguments(command, forwardedRaw, files)
   const plan = command === "plan" ? planOutput(forwarded) : undefined
   // A failed plan must never leave an older plan where the apply looks.
   if (plan) rmSync(plan, { force: true })
-  process.exitCode = Bun.spawnSync(
-    ["terraform", `-chdir=${files.root}`, command, ...forwarded],
-    {
-      env: {
-        ...process.env,
-        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
-        TF_VAR_database_url: env.DATABASE_URL ?? "",
-        TF_VAR_database_ca_pem:
-          config.database_ca && ["plan", "apply", "destroy"].includes(command)
-            ? neonCaPem()
-            : "",
-        ...(source
-          ? { TF_VAR_source_dir: source.path, AZAD_SOURCE: source.path }
-          : {}),
-        ...terraformEnvironment(files),
-      },
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
+  const phase = changingPhase(command, forwardedRaw)
+  if (!phase || !app) {
+    process.exitCode = terraform([command, ...forwarded]).status
+    return
+  }
+  process.exitCode = withOperation(
+    app,
+    phase,
+    options["take-over"],
+    (lease) => {
+      const status = terraform([command, ...forwarded]).status
+      // The deployment object tells release updates what this infrastructure
+      // provides; it is written after every successful apply.
+      if (
+        status === 0 &&
+        command === "apply" &&
+        terraformOutputs(terraform).deploy
+      )
+        app.publish(lease, JSON.stringify(handoff(lease)), REPOSITORY)
+      return status
     }
-  ).exitCode
+  )
+}
+
+const outputsSchema = z.record(z.string(), z.looseObject({ value: z.json() }))
+
+/** The root's outputs the deploy uses: its handoff and, for Cloud SQL, the database URL. */
+function terraformOutputs(terraform: TerraformRun) {
+  const result = terraform(["output", "-json"], { capture: true })
+  if (result.status !== 0)
+    throw new SetupError(
+      "Terraform could not read this installation's outputs."
+    )
+  const outputs = outputsSchema.parse(JSON.parse(result.stdout || "{}"))
+  const deploy = z
+    .record(z.string(), z.json())
+    .nullish()
+    .parse(outputs.deploy?.value)
+  const databaseUrl = z.string().nullish().parse(outputs.database_url?.value)
+  return { deploy, database_url: databaseUrl ?? undefined }
+}
+
+/** The operation id inside a lease the app's install-store.ts printed. */
+function leaseId(lease: string): string {
+  return z.object({ id: z.string() }).parse(JSON.parse(lease)).id
 }
 
 if (import.meta.main) {

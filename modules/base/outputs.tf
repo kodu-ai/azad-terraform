@@ -41,3 +41,8 @@ output "reserved_routes" {
   description = "Hostname routes, without a Worker, that keep other Workers routes off the Board's hosts."
   value       = try(module.host_routes[0].patterns, [])
 }
+
+output "deploy" {
+  description = "The handoff `cloudflare.ts deploy` gives the app's installer, without its revision and database URL; null without a deployment."
+  value       = module.installation.installer_input
+}

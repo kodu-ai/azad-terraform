@@ -31,3 +31,8 @@ output "github_app" {
   description = "GitHub App status of the deployment. PENDING: the deployed GITHUB_APP_* values are unverified placeholders."
   value       = var.github_app_pending ? "PENDING: GitHub App verification was deferred (github_app_pending = true). GitHub sign-in, repositories and webhooks do not work until you register the GitHub App, put its values in the installer file, set github_app_pending = false and apply again." : "verified by the installer preflight"
 }
+
+output "deploy" {
+  description = "The handoff `cloudflare.ts deploy` gives the app's installer, without its revision and database URL; null without a deployment."
+  value       = module.base.deploy
+}

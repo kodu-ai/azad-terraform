@@ -64,16 +64,15 @@ variable "cloudflare" {
 }
 
 variable "deployment" {
-  description = "Installer handoff. The drivers write absolute paths in the instance directory; a relative path is relative to the Terraform root directory. Set enabled=false for infrastructure only."
+  description = "Installer handoff for `cloudflare.ts deploy`. The drivers write absolute paths in the instance directory, beside the source revision the deploy installs (deployment.revision, read by the driver only); a relative path is relative to the Terraform root directory. Set enabled=false for infrastructure only."
   type = object({
     enabled         = optional(bool, true)
     env_file        = optional(string, ".env.self-host")
-    revision        = string
     state_directory = optional(string, ".installer-state")
   })
   validation {
-    condition     = can(regex("^[a-f0-9]{40}$", var.deployment.revision)) && length(var.deployment.env_file) > 0 && length(var.deployment.state_directory) > 0
-    error_message = "Provide an exact 40-character Git revision, selected installer dotenv file and persistent installer state directory."
+    condition     = length(var.deployment.env_file) > 0 && length(var.deployment.state_directory) > 0
+    error_message = "Provide the selected installer dotenv file and a persistent installer state directory."
   }
 }
 
@@ -135,7 +134,7 @@ variable "host_zones" {
 }
 
 variable "source_dir" {
-  description = "Absolute path of the Azad app source checkout (kodu-ai/azad-ide-web) whose scripts/self-host entrypoints deploy and uninstall the app; its HEAD must be deployment.revision. The drivers set it from --source (TF_VAR_source_dir). Required to deploy; plans without a deployment need none."
+  description = "Absolute path of the Azad app source checkout (kodu-ai/azad-ide-web) whose scripts/self-host/cloudflare-install.ts uninstalls the app on destroy. The drivers set it from --source (TF_VAR_source_dir)."
   type        = string
   default     = null
   validation {

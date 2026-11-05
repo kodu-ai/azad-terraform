@@ -7,9 +7,12 @@
  *
  *   bun --no-env-file <source>/scripts/self-host/<entry>.ts …
  *
- * The drivers call `settings.ts` during setup; Terraform's provisioners run
- * `cloudflare-install.ts` (modules/installation) and `celld-install.ts`
- * (modules/celld/app) with the path the drivers pass as `source_dir`.
+ * The drivers call `settings.ts` during setup, `cloudflare-install.ts install`
+ * and `celld-install.ts` in their `deploy` (with the handoff Terraform
+ * outputs), and `install-store.ts` around every command that changes the
+ * installation (see ./state.ts). Terraform's destroy-time provisioner runs
+ * `cloudflare-install.ts uninstall` (modules/installation) from the path the
+ * drivers pass as `source_dir`.
  * Settings travel on stdin as JSON, never as arguments or files. The
  * settings entrypoint exits 0 with JSON on stdout, 65 when it refuses a
  * setting (its reason on stderr) and 64 for a usage error.
@@ -24,6 +27,7 @@ export const ENTRYPOINTS = [
   "scripts/self-host/settings.ts",
   "scripts/self-host/cloudflare-install.ts",
   "scripts/self-host/celld-install.ts",
+  "scripts/self-host/install-store.ts",
 ] as const
 
 /** A refusal whose message names paths and settings, never their values. */

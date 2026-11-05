@@ -10,7 +10,8 @@ Everything an installation needs, where it lives and who fills it in. The
 | Your shell | `AZAD_SOURCE`, Google credentials, proxy settings | You |
 | `<instance>/.env` (mode 0600) | Credentials and app settings. Setup reads it, the drivers take `CLOUDFLARE_API_TOKEN` and `DATABASE_URL` from it, and the deploy reads all of it | You, plus a few keys setup adds |
 | `<instance>/terraform/<root>/terraform.tfvars.json` | Non-secret Terraform variables | Setup writes it once; you edit it afterwards |
-| Terraform state, `installer-state/`, `celld-install/` | Generated passwords, keys and the deploy's own state | Terraform and the deploy |
+| The installation's bucket and secret store | Terraform state (generated passwords), the app's receipts and its keys | Terraform and the deploy |
+| `installer-state/`, `celld-install/` | The deploy's cache of the keys and receipts | The deploy |
 
 `<instance>` is the directory you pass as `--instance-dir`, for example
 `~/.azad/instances/default`. `<root>` is `postgres`, `cloudsql` or `gcp-celld`.
@@ -19,7 +20,8 @@ Everything an installation needs, where it lives and who fills it in. The
 
 | Name | Needed for | What it does |
 | --- | --- | --- |
-| `AZAD_SOURCE` | `setup`, `refresh`, `plan`, `apply`, `destroy`, unless you pass `--source` | Path of the Azad app checkout (a clone of `kodu-ai/azad-ide-web` with `bun install` done). The drivers check that it is the checkout's top level with the `scripts/self-host` entrypoints and installed dependencies, and bind the deploy to its `HEAD`. Read-only commands (`init`, `output`, `show`, `state`, `phase`) don't need it. |
+| `AZAD_SOURCE` | `setup`, `refresh`, `plan`, `apply`, `deploy`, `destroy`, `backup-keys`, `import` and the `state` commands that write, unless you pass `--source` | Path of the Azad app checkout (a clone of `kodu-ai/azad-ide-web` with `bun install` done). The drivers check that it is the checkout's top level with the `scripts/self-host` entrypoints and installed dependencies, and bind the deploy to its `HEAD`. Read-only commands (`init`, `output`, `show`, `state list`, `phase`) don't need it. |
+| `AZAD_CLI_VERSION` | No | The `azad` CLI sets it; the drivers record it with the deployment. |
 | Google Application Default Credentials | `cloudsql` and `gcp-celld` | `gcloud auth application-default login` (or `GOOGLE_APPLICATION_CREDENTIALS`). Terraform's Google provider and the Google Cloud deploy use them. |
 | `gcloud` signed in | `gcp-celld` | `gcloud auth login`. Destroy uses the gcloud CLI to wait for the cluster's disks and, for an evaluation install, to delete its backups. |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` | `cloudsql` setup | When one is set, setup can't see your direct egress address and asks for `--runner-cidr`. |
@@ -157,7 +159,7 @@ point-in-time recovery, and accepts only encrypted connections.
 | `web_host` | Yes (setup) | The browser hostname; the API is `api.<web_host>` and Mini Apps `<app>.apps.<web_host>` | `azad.example.com` |
 | `name` | Yes (setup) | Prefix of every Google resource, derived from the hostname | `azad-azad-1a2b` |
 | `cloudflare_zone_id` | Yes (setup) | The Cloudflare zone of the hostnames | 32 hex characters |
-| `deployment` | Yes (setup) | `revision`, `env_file` and `state_directory` (`celld-install/` in the instance) | |
+| `deployment` | Yes (setup) | `revision` (the source `deploy` installs; the driver reads it, Terraform does not), `env_file` and `state_directory` (`celld-install/` in the instance) | |
 | `deletion_protection` | No | Protects the cluster, database and agent machine. `false` also lets destroy delete the fleet bucket and the disk backups | `true` (`false` with `--evaluation`) |
 | `spot` | No | Spot nodes: cheaper, preemptible | `false` (`true` with `--evaluation`) |
 | `database` | No | `tier`, `disk_size_gb`, `backups`, `flags` | `db-custom-1-3840`, 10 GB, backups on |
@@ -178,8 +180,9 @@ point-in-time recovery, and accepts only encrypted connections.
 Cloudflare's dashboard calls the API's "Write" permissions "Edit".
 
 - **Azad on Cloudflare:** Account: Account Settings Read, Workers Scripts
-  Edit, Workers R2 Storage Edit, Queues Edit, Hyperdrive Edit and Cloudflare
-  Pages Edit. Zone (the zones of your hostnames): Zone Read, DNS Edit and
+  Edit, Workers R2 Storage Edit, Queues Edit, Hyperdrive Edit, Cloudflare
+  Pages Edit and Secrets Store Edit (the instance keys). R2 also holds
+  Terraform's state, reached with this token's S3 credentials. Zone (the zones of your hostnames): Zone Read, DNS Edit and
   Workers Routes Edit. With `sslmode=verify-full`, also Account: SSL and
   Certificates Read for an existing CA ID, or Edit for
   `AZAD_SELF_HOST_DATABASE_CA=neon-isrg-root-x1`.
@@ -198,18 +201,20 @@ token that can create tokens.
   Consumer).
 - **`gcp-celld`:** Owner, or Editor plus Project IAM Admin. Terraform turns on
   the Google APIs it uses (Compute, GKE, Cloud Storage, Cloud SQL Admin,
-  Certificate Manager, Backup for GKE).
+  Certificate Manager, Secret Manager, Backup for GKE). `init` creates the
+  state bucket with the Cloud Storage API, which new projects have on.
 
 ## Generated for you
 
-You never type these. Back them up with the instance directory.
+You never type these. `backup-keys --out DIR` writes an offline copy of the
+app's keys.
 
 | What | Where it's kept |
 | --- | --- |
-| Cloud SQL password | Terraform state. On `cloudsql`, `TF_VAR_database_password` can replace it |
+| Cloud SQL password | Terraform state, in the installation's bucket. On `cloudsql`, `TF_VAR_database_password` can replace it |
 | Forgejo service password, agent machine SSH keys, Origin CA key (`gcp-celld`) | Terraform state |
-| `GITHUB_WEBHOOK_SECRET` when you supply none | Cloudflare: the `.env`. Google Cloud: `celld-install/secrets.json` |
-| The app's own secrets (`REALTIME_UPGRADE_SECRET`, `MEDIA_CAPABILITY_SECRET`, `INTERNAL_API_SECRET`, `AGENT_TASK_SECRET_CIPHER_KEY`, `VAPID_PRIVATE_JWK`, `MINIAPP_TOKEN_PRIVATE_JWK`, the release signing key) | `installer-state/` (Cloudflare) or `celld-install/` (Google Cloud). They decrypt the data in your database: never delete them to retry a deploy |
+| `GITHUB_WEBHOOK_SECRET` when you supply none | Cloudflare: the `.env`. Google Cloud: with the app's secrets |
+| The app's own secrets (`REALTIME_UPGRADE_SECRET`, `MEDIA_CAPABILITY_SECRET`, `INTERNAL_API_SECRET`, `AGENT_TASK_SECRET_CIPHER_KEY`, `VAPID_PRIVATE_JWK`, `MINIAPP_TOKEN_PRIVATE_JWK`, the release signing key) | The account's Secrets Store (Cloudflare) or the project's Secret Manager (Google Cloud), written once and never replaced; cached in `installer-state/` or `celld-install/`. They decrypt the data in your database: never delete them to retry a deploy |
 
 Terraform state and saved plans are sensitive. Cloud SQL's DSN and password
 are in both; an existing database's `DATABASE_URL` is only in saved plans,

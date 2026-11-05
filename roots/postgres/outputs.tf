@@ -25,3 +25,8 @@ output "database_ca_certificate_id" {
   description = "Terraform-owned public CA ID, or null for existing CA reuse."
   value       = module.base.database_ca_certificate_id
 }
+
+output "deploy" {
+  description = "The handoff `cloudflare.ts deploy` gives the app's installer, without its revision and database URL; null without a deployment."
+  value       = module.base.deploy
+}

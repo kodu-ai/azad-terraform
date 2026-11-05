@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
-import { generateKeyPairSync, verify } from "node:crypto"
+import { createHash, generateKeyPairSync, verify } from "node:crypto"
 import {
   existsSync,
   mkdirSync,
@@ -20,6 +20,7 @@ import {
   type InstanceTerraform,
 } from "./instance"
 import { SettingsRefused, type AppSettings } from "./source"
+import { cloudflareStore } from "./state"
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -82,15 +83,41 @@ function layout(prefix: string, root: "postgres" | "cloudsql" = "postgres") {
   }
 }
 
-/** What `init` records: the instance's working data points at its own state. */
+/** The installation's R2 bucket for the fixture's account and API origin. */
+const fixtureStore = cloudflareStore(
+  "0".repeat(32),
+  "https://api.board.example.com"
+)
+
+/** What `init` records: the working data and backend record point at the installation's bucket. */
 function initialized(files: InstanceTerraform) {
   mkdirSync(files.data, { recursive: true })
   writeFileSync(
     join(files.data, "terraform.tfstate"),
     JSON.stringify({
-      backend: { type: "local", config: { path: files.state } },
+      backend: { type: "s3", config: { bucket: fixtureStore.bucket } },
     })
   )
+  writeFileSync(
+    files.backendRecord,
+    JSON.stringify({
+      store: fixtureStore,
+      token: {
+        id: "fixture-token-id",
+        digest: createHash("sha256").update("fake-cf-token").digest("hex"),
+      },
+    })
+  )
+}
+
+/** Each call the fake app's install-store.ts got. */
+function stateCalls(source: { path: string }) {
+  const path = join(source.path, "state-calls.jsonl")
+  if (!existsSync(path)) return []
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
 }
 
 /** A `terraform` on PATH that prints what it was run with. */
@@ -340,7 +367,7 @@ test("forwards a saved-plan command with the selected token, the instance's vari
   initialized(f.files)
   const bin = echoTerraform(
     f.directory,
-    "process.stdout.write(JSON.stringify({ args: process.argv.slice(2), token: process.env.CLOUDFLARE_API_TOKEN, data: process.env.TF_DATA_DIR, source: process.env.TF_VAR_source_dir, uninstallSource: process.env.AZAD_SOURCE }))"
+    "const args = process.argv.slice(2); process.stdout.write(args[1] === 'output' ? '{}' : JSON.stringify({ args, token: process.env.CLOUDFLARE_API_TOKEN, data: process.env.TF_DATA_DIR, source: process.env.TF_VAR_source_dir, uninstallSource: process.env.AZAD_SOURCE, r2Key: process.env.AWS_ACCESS_KEY_ID, r2Secret: process.env.AWS_SECRET_ACCESS_KEY }))"
   )
   const env = {
     PATH: `${bin}:${process.env.PATH}`,
@@ -372,7 +399,12 @@ test("forwards a saved-plan command with the selected token, the instance's vari
     data: f.files.data,
     source: f.source.path,
     uninstallSource: f.source.path,
+    // R2's S3 keys for the state bucket: the token's id and its SHA-256.
+    r2Key: "fixture-token-id",
+    r2Secret: createHash("sha256").update("fake-cf-token").digest("hex"),
   })
+  // A plan changes nothing, so it takes no operation record.
+  expect(stateCalls(f.source)).toEqual([])
   // AZAD_SOURCE stands in for --source.
   const apply = driver(
     [
@@ -391,6 +423,17 @@ test("forwards a saved-plan command with the selected token, the instance's vari
     join(f.files.directory, "terraform.tfplan"),
   ])
   expect(JSON.parse(apply.stdout.toString()).source).toBe(f.source.path)
+  // The apply held the installation's operation record and released it; a
+  // root without a deployment handoff publishes nothing.
+  const calls = stateCalls(f.source)
+  expect(calls.map((call) => call.command)).toEqual(["acquire", "finish"])
+  expect(calls[0].args.slice(0, 2)).toEqual(["--phase", "terraform-apply"])
+  expect(calls[0].state).toEqual({
+    store: fixtureStore,
+    kind: "cloudflare",
+    env_file: f.files.settings,
+    state_directory: join(f.files.directory, "installer-state"),
+  })
 })
 
 test("commands that deploy or uninstall need a valid app source checkout; state readers do not", async () => {
@@ -430,6 +473,10 @@ test("commands that deploy or uninstall need a valid app source checkout; state 
     expect(reader.exitCode).toBe(0)
     expect(JSON.parse(reader.stdout.toString()).source).toBeNull()
   }
+  // A state command that writes holds the operation record, so it needs the source.
+  expect(run("state", "rm", "module.x").stderr.toString()).toContain(
+    "--source is required"
+  )
 })
 
 test("--root takes a root name, never a path", () => {
@@ -462,35 +509,17 @@ test("--help prints the usage without an instance directory", () => {
   expect(nothing.stderr.toString()).toContain("No operation runs by default.")
 })
 
-test("init points the backend and working data at the instance; other commands wait for it", async () => {
+test("other commands wait until init has configured the state bucket", async () => {
   const f = layout("terraform-cloudflare-init-")
   const result = await prepareCloudflare(input, app, boundary().fetcher)
   saveCloudflare(f.files, result, f.credentialsFile)
-  const bin = echoTerraform(
-    f.directory,
-    "process.stdout.write(JSON.stringify({ args: process.argv.slice(2), data: process.env.TF_DATA_DIR }))"
-  )
-  const env = { PATH: `${bin}:${process.env.PATH}` }
+  const bin = echoTerraform(f.directory, "process.stdout.write('{}')")
   const before = driver(
     ["output", "--root", f.root, "--instance-dir", f.files.instance],
-    env
+    { PATH: `${bin}:${process.env.PATH}` }
   )
   expect(before.exitCode).toBe(1)
   expect(before.stderr.toString()).toContain("init --root postgres")
-  const init = driver(
-    ["init", "--root", f.root, "--instance-dir", f.files.instance],
-    env
-  )
-  expect(JSON.parse(init.stdout.toString())).toEqual({
-    args: [
-      `-chdir=${f.rootDirectory}`,
-      "init",
-      "-reconfigure",
-      `-backend-config=path=${f.files.state}`,
-      `-backend-config=workspace_dir=${f.files.workspaces}`,
-    ],
-    data: f.files.data,
-  })
 })
 
 test("reports failed account lookups without echoing provider response bodies", async () => {

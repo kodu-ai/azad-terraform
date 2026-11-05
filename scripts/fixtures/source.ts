@@ -2,7 +2,9 @@
  * A stand-in Azad app source checkout for tests: a Git repository with the
  * scripts/self-host entrypoints the drivers require. Its settings.ts speaks
  * the real protocol (JSON on stdin and stdout, exit 65 for a refused setting)
- * with fixed answers, and records each call in `calls.jsonl`.
+ * with fixed answers, and records each call in `calls.jsonl`; its
+ * install-store.ts hands out one fixed lease and records each call (with the
+ * handoff it got) in `state-calls.jsonl`.
  */
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -27,6 +29,14 @@ if (command === "resource-names") {
 }
 `
 
+const INSTALL_STORE_ENTRY = `const [command, ...args] = process.argv.slice(2)
+const stdin = command === "publish" ? JSON.parse(await Bun.stdin.text()) : undefined
+const { appendFileSync } = await import("node:fs")
+appendFileSync(new URL("../../state-calls.jsonl", import.meta.url), JSON.stringify({ command, args, state: JSON.parse(process.env.AZAD_INSTALL_STATE ?? "null"), stdin }) + "\\n")
+if (command === "acquire") process.stdout.write(JSON.stringify({ id: "operation-fixture", version: "1" }))
+if (command === "backup") process.stdout.write(args[args.indexOf("--out") + 1])
+`
+
 /** Creates the checkout in `directory` and returns its path and HEAD. */
 export function fakeSource(directory: string): {
   path: string
@@ -36,6 +46,10 @@ export function fakeSource(directory: string): {
   mkdirSync(join(path, "scripts/self-host"), { recursive: true })
   mkdirSync(join(path, "node_modules"))
   writeFileSync(join(path, "scripts/self-host/settings.ts"), SETTINGS_ENTRY)
+  writeFileSync(
+    join(path, "scripts/self-host/install-store.ts"),
+    INSTALL_STORE_ENTRY
+  )
   for (const entry of ["cloudflare-install.ts", "celld-install.ts"])
     writeFileSync(join(path, "scripts/self-host", entry), "process.exit(0)\n")
   const git = (...args: string[]) => {

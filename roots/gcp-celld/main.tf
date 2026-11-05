@@ -1,7 +1,8 @@
 # Own-infrastructure composition on Google Cloud: celld fleets on GKE Autopilot
 # with state in GCS behind a regional GKE Gateway, Cloud SQL through the Cloud
-# SQL Auth Proxy, Cloudflare for DNS (and optionally its proxy), and the app
-# deployed by module.app. Both fleets use the cloud-neutral modules/celld/fleet.
+# SQL Auth Proxy, and Cloudflare for DNS (and optionally its proxy). The app
+# itself is deployed by `gcp.ts deploy` with module.app's handoff, never by a
+# plan. Both fleets use the cloud-neutral modules/celld/fleet.
 
 locals {
   api_host  = "api.${var.web_host}"
@@ -383,13 +384,20 @@ data "google_compute_subnetwork" "cluster" {
   name    = basename(module.gke.network.subnetwork)
 }
 
-# The app itself: instance keys, migrations, the Agent Connect release mirror
-# and both bundles, deployed into the fleets once everything they need exists.
+# The installation's keys live in Secret Manager (written by the app's deploy,
+# never by Terraform), beside the state bucket the drivers create.
+resource "google_project_service" "secret_manager" {
+  project            = var.project_id
+  service            = "secretmanager.googleapis.com"
+  disable_on_destroy = false
+}
+
+# What `gcp.ts deploy` gives the app's deploy: instance keys, migrations, the
+# Agent Connect release mirror and both bundles, written into the fleets.
 module "app" {
   source     = "../../modules/celld/app"
   count      = var.deployment == null ? 0 : 1
   deployment = var.deployment
-  source_dir = var.source_dir
   fleets = {
     api = module.api.bucket
     web = module.web.bucket
@@ -415,14 +423,4 @@ module "app" {
     [data.google_compute_subnetwork.cluster.ip_cidr_range],
     var.ssh_allowed_private_cidrs,
   ))
-
-  depends_on = [
-    module.gke,
-    module.forgejo,
-    module.gateway,
-    module.dns,
-    module.edge,
-    module.clerk_dns,
-    google_project_iam_member.database_client,
-  ]
 }

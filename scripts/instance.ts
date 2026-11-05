@@ -1,15 +1,19 @@
 /**
  * One installation's Terraform files live in its instance directory, never in
  * this repository or the app's source checkout, so any copy of the same
- * release drives it and a fresh copy loses nothing:
+ * release drives it. Terraform's state and the app's install state live in
+ * the installation's own bucket (see ./state.ts); this directory holds the
+ * settings, the variables and a cache:
  *
  *   <instance>/.env                         private settings the deploy reads
  *   <instance>/terraform/<root name>/       one Terraform root's files:
- *     terraform.tfstate, .backup            the local backend's state
+ *     backend.tfbackend, backend.json       the state bucket, written by init
  *     terraform.tfvars.json                 the variables setup wrote
  *     *.tfplan                              saved plans
  *     .terraform/                           Terraform's working data (TF_DATA_DIR)
- *     installer-state/, celld-install/      the deploy step's state and keys
+ *     installer-state/, celld-install/      the deploy's cache of the keys and receipts
+ *     terraform.tfstate.before-remote-*     the local state of a release before
+ *                                           0.1.0, kept after init moved it
  *
  * The drivers (`cloudflare.ts`, `gcp.ts`) run every Terraform command in a
  * root of this repository (`roots/<root name>`) with this directory's
@@ -54,12 +58,15 @@ export type InstanceTerraform = {
   instance: string
   /** `<instance>/terraform/<root name>`. */
   directory: string
+  /** The local state of a release before 0.1.0, which `init` moves into the bucket. */
   state: string
+  /** The backend configuration `init` passes (`-backend-config`). */
+  backend: string
+  /** What `init` recorded about the state bucket (see ./state.ts). */
+  backendRecord: string
   vars: string
   /** Terraform's working data (providers, the backend record): `TF_DATA_DIR`. */
   data: string
-  /** Non-default workspaces of the local backend; the drivers use none. */
-  workspaces: string
   /** `<instance>/.env`, the private settings file of a new installation. */
   settings: string
 }
@@ -96,9 +103,10 @@ export function instanceTerraform(
     instance: base,
     directory,
     state: join(directory, "terraform.tfstate"),
+    backend: join(directory, "backend.tfbackend"),
+    backendRecord: join(directory, "backend.json"),
     vars: join(directory, "terraform.tfvars.json"),
     data: join(directory, ".terraform"),
-    workspaces: join(directory, "workspaces"),
     settings: join(base, ".env"),
   }
 }
@@ -166,11 +174,12 @@ export function appliesSavedPlan(command: string, args: string[]): boolean {
 
 /**
  * Terraform arguments for one command against the instance. `init`
- * configures the local backend at the instance's state (`-reconfigure`: after
- * the instance directory moves, Terraform neither copies state from nor reuses
- * the path it recorded). Commands that read variables get the instance's
- * tfvars, except an apply of a saved plan. A relative plan path (`-out=NAME`,
- * `apply NAME`, `show NAME`) is in the instance's Terraform directory.
+ * configures the backend at the installation's bucket (`-reconfigure`:
+ * Terraform never copies state from a backend it recorded earlier; the
+ * drivers move a local state themselves). Commands that read variables get
+ * the instance's tfvars, except an apply of a saved plan. A relative plan
+ * path (`-out=NAME`, `apply NAME`, `show NAME`) is in the instance's
+ * Terraform directory.
  */
 export function terraformArguments(
   command: string,
@@ -178,12 +187,7 @@ export function terraformArguments(
   files: InstanceTerraform
 ): string[] {
   if (command === "init")
-    return [
-      "-reconfigure",
-      `-backend-config=path=${files.state}`,
-      `-backend-config=workspace_dir=${files.workspaces}`,
-      ...args,
-    ]
+    return ["-reconfigure", `-backend-config=${files.backend}`, ...args]
   const local = (path: string) => resolve(files.directory, path)
   const plan = planArgument(command, args)
   const resolved = args.map((arg, index) => {
@@ -197,7 +201,13 @@ export function terraformArguments(
 }
 
 /** The drivers' own options, wherever they appear; the rest go to Terraform. */
-const DRIVER_OPTIONS = ["--root", "--instance-dir", "--source"]
+const DRIVER_OPTIONS = [
+  "--root",
+  "--instance-dir",
+  "--source",
+  "--take-over",
+  "--out",
+]
 
 /** Arguments a driver forwards to Terraform: everything but its own options. */
 export function forwardedArgs(args: string[]): string[] {
@@ -207,6 +217,25 @@ export function forwardedArgs(args: string[]): string[] {
       !DRIVER_OPTIONS.includes(args[index - 1] ?? "") &&
       !DRIVER_OPTIONS.some((option) => arg.startsWith(`${option}=`))
   )
+}
+
+/** `state` subcommands that write the state; the others only read it. */
+const STATE_WRITERS = new Set(["mv", "rm", "push", "replace-provider"])
+
+/**
+ * The phase a command journals in the install-wide operation record, or
+ * undefined for a command that changes nothing (plan, output, show, the
+ * state readers). `init` takes none: the state it moves is this machine's.
+ */
+export function changingPhase(
+  command: string,
+  forwarded: string[]
+): string | undefined {
+  if (["apply", "destroy", "import"].includes(command))
+    return `terraform-${command}`
+  if (command === "state" && STATE_WRITERS.has(forwarded[0] ?? ""))
+    return "terraform-state"
+  return undefined
 }
 
 /** The saved plan a resolved `plan` command writes, if any. */
@@ -222,54 +251,71 @@ const backendRecordSchema = z.looseObject({
   backend: z
     .looseObject({
       type: z.string(),
-      config: z.looseObject({ path: z.string().nullish() }).nullish(),
+      config: z.looseObject({ bucket: z.string().nullish() }).nullish(),
     })
     .nullish(),
 })
 
+/** The backend each root declares: R2's S3 API on Cloudflare, GCS on Google Cloud. */
+export const ROOT_BACKENDS: Record<RootName, "s3" | "gcs"> = {
+  postgres: "s3",
+  cloudsql: "s3",
+  "gcp-celld": "gcs",
+}
+
 /**
  * Refuses a command until `init` has pointed the instance's working data at
- * its own state. A working directory initialized for another path (a moved
- * instance directory) would otherwise read that path, find no state and plan
- * to create everything again.
+ * the installation's bucket. A working directory initialized for the local
+ * backend of a release before 0.1.0, or for another bucket, would otherwise
+ * plan against the wrong state.
  */
 export function assertInitialized(
   files: InstanceTerraform,
+  bucket: string,
   init: string
 ): void {
-  if (!initializedForInstance(files))
+  if (!initializedForBucket(files, bucket))
     throw new InstanceError(
-      `${files.directory} is not initialized for its own state yet. Run:\n  ${init}`
+      `${files.directory} is not initialized for its state bucket yet. Run:\n  ${init}`
     )
 }
 
-/** True when the working data's backend record is the local backend at the instance's state. */
-function initializedForInstance(files: InstanceTerraform): boolean {
+/** True when the working data's backend record is this root's backend at `bucket`. */
+function initializedForBucket(
+  files: InstanceTerraform,
+  bucket: string
+): boolean {
   try {
     const { backend } = backendRecordSchema.parse(
       JSON.parse(readFileSync(join(files.data, "terraform.tfstate"), "utf8"))
     )
-    return backend?.type === "local" && backend.config?.path === files.state
+    return (
+      backend?.type === ROOT_BACKENDS[files.name] &&
+      backend.config?.bucket === bucket
+    )
   } catch {
     return false
   }
 }
 
 /**
- * Refuses a root that does not declare `backend "local" {}`: Terraform
- * ignores `-backend-config` without one and would keep the state in the root.
+ * Refuses a root that does not declare its remote backend: Terraform ignores
+ * `-backend-config` without one and would keep the state in the root.
  */
-export function assertLocalBackend(root: string): void {
+export function assertBackend(files: InstanceTerraform): void {
+  const type = ROOT_BACKENDS[files.name]
   const declared =
-    existsSync(root) &&
-    readdirSync(root).some(
+    existsSync(files.root) &&
+    readdirSync(files.root).some(
       (name) =>
         name.endsWith(".tf") &&
-        /^\s*backend\s+"local"/mu.test(readFileSync(join(root, name), "utf8"))
+        new RegExp(`^\\s*backend\\s+"${type}"`, "mu").test(
+          readFileSync(join(files.root, name), "utf8")
+        )
     )
   if (!declared)
     throw new InstanceError(
-      `${root} does not declare backend "local" {}, so Terraform would keep its state there. Use a release whose roots keep state in the instance directory.`
+      `${files.root} does not declare backend "${type}" {}, so Terraform would keep its state there. Use a release whose roots keep state in the installation's bucket.`
     )
 }
 

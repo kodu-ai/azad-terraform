@@ -2,9 +2,11 @@
 
 The `gcp-celld` root runs Azad in your Google Cloud project on GKE Autopilot,
 with no Cloudflare runtime; Cloudflare only serves DNS for your domain.
-`scripts/gcp.ts` drives it. One apply creates the infrastructure and then runs
-the Azad source checkout's `scripts/self-host/celld-install.ts` to deploy the
-app (see [how-it-works.md](how-it-works.md)).
+`scripts/gcp.ts` drives it. `apply` creates the infrastructure; `deploy` then
+runs the Azad source checkout's `scripts/self-host/celld-install.ts` with
+Terraform's handoff (see [how-it-works.md](how-it-works.md)). Terraform's
+state and the app's install state live in the installation's GCS bucket, the
+keys in the project's Secret Manager.
 
 ## What gets created
 
@@ -19,13 +21,14 @@ app (see [how-it-works.md](how-it-works.md)).
 | Mini Apps | Run inside the API fleet, served at `<app>.apps.<host>` |
 | Agent machine (optional) | One Compute Engine VM for agents, `<name>-agents`, without a public address; only the cluster's pods reach its SSH |
 | Disk backups | Backup for GKE snapshots of the `azad` namespace's disks on the schedule chosen at setup |
+| Install state | The GCS bucket `<name>-<project hash>-install` (versioned, created by `init`): Terraform's state and the app's receipts. The instance keys are Secret Manager secrets named after it |
 
 The installation name (`<name>`) is derived from the hostname, so several
 installations can share one project. A VPC has one proxy-only subnet per
 region: a second installation in the same project and region sets
 `proxy_only_subnet_range = null` to use the first one's, and the installation
 that created the subnet is destroyed last. Terraform enables the Compute, GKE,
-Cloud SQL and Certificate Manager APIs it needs.
+Cloud SQL, Certificate Manager and Secret Manager APIs it needs.
 
 ## Before you start
 
@@ -115,26 +118,24 @@ plan and apply:
   agent_machine` and the key from `gcp.ts output --instance-dir "$instance"
   -raw agent_machine_private_key`. Terraform sets `SSH_ALLOWED_PRIVATE_CIDRS`
   to the cluster's subnet (plus `ssh_allowed_private_cidrs`).
-- **Back up** the instance directory: `terraform/gcp-celld/celld-install/`
-  holds the instance's signing and encryption keys, and updates need them.
+- **Keep an offline copy of the keys**: `gcp.ts backup-keys --instance-dir
+  "$instance" --out DIR` writes the instance's signing and encryption keys.
+  The deploy keeps them in Secret Manager and refills
+  `terraform/gcp-celld/celld-install/` from there, so another machine can
+  deploy too.
 
 ## Update
 
 ```sh
 git -C "$AZAD_SOURCE" pull && bun install --frozen-lockfile --cwd "$AZAD_SOURCE"
 bun --no-env-file scripts/gcp.ts refresh --instance-dir "$instance"   # records the new HEAD
-bun --no-env-file scripts/gcp.ts init    --instance-dir "$instance"
-bun --no-env-file scripts/gcp.ts plan    --instance-dir "$instance" -out=terraform.tfplan
-bun --no-env-file scripts/gcp.ts apply   --instance-dir "$instance" terraform.tfplan
+bun --no-env-file scripts/gcp.ts deploy  --instance-dir "$instance"
 ```
 
-The deploy waits until the API serves the new revision. To redeploy the same
-revision:
-
-```sh
-bun --no-env-file scripts/gcp.ts apply --instance-dir "$instance" \
-  -replace='module.app[0].terraform_data.deploy'
-```
+The deploy waits until the API serves the new revision, and refuses a checkout
+older than the revision the installation runs. Terraform never deploys the
+app: run `plan` and `apply` only to change infrastructure, then `deploy`. To
+redeploy the same revision, deploy again.
 
 ### Native push for the mobile apps
 
@@ -144,13 +145,13 @@ has your session and no relay token yet:
 
 ```sh
 export AZAD_PUSH_RELAY_SESSION_TOKEN='<short-lived azad.pro session token>'
-bun --no-env-file scripts/gcp.ts apply --instance-dir "$instance" \
-  -replace='module.app[0].terraform_data.deploy'
+bun --no-env-file scripts/gcp.ts deploy --instance-dir "$instance"
 unset AZAD_PUSH_RELAY_SESSION_TOKEN
 ```
 
-The relay token is kept in `celld-install/secrets.json` and deployed on every
-later update; the session token is never written to a file.
+The relay token is kept in Secret Manager (and `celld-install/secrets.json`)
+and deployed on every later update; the session token is never written to a
+file.
 
 ## Remove everything
 
@@ -176,8 +177,7 @@ bun --no-env-file scripts/gcp.ts destroy --instance-dir "$instance"
 ## Troubleshooting
 
 - **The deploy log** is `terraform/gcp-celld/celld-install/install.log` in the
-  instance directory (Terraform hides the deploy's output because its input
-  holds the database password).
+  instance directory; `deploy` prints the same lines.
 - **The apply stops waiting for the load balancer:** the `A` records are left
   as they were. Check the certificate with `gcloud certificate-manager
   certificates describe <name>-tls --location=<region>` and the Gateway with

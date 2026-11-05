@@ -9,9 +9,12 @@ Queues, Hyperdrive) in your Cloudflare account:
   Cloud project, reached by Hyperdrive and the migration runner over public
   IPv4 with explicitly authorized networks.
 
-`scripts/cloudflare.ts` drives both. One apply provisions the fixed
-infrastructure and then hands the app deployment to the Azad source checkout's
-`scripts/self-host/cloudflare-install.ts` (see [how-it-works.md](how-it-works.md)).
+`scripts/cloudflare.ts` drives both. `apply` provisions the fixed
+infrastructure; `deploy` then runs the Azad source checkout's
+`scripts/self-host/cloudflare-install.ts` with Terraform's handoff (see
+[how-it-works.md](how-it-works.md)). Terraform's state and the app's install
+state live in the installation's R2 bucket, the keys in the account's Secrets
+Store.
 
 ## Account ownership and location
 
@@ -54,6 +57,7 @@ bun --no-env-file scripts/cloudflare.ts setup --database-provider postgres \
 bun --no-env-file scripts/cloudflare.ts init  --root postgres --instance-dir "$instance"
 bun --no-env-file scripts/cloudflare.ts plan  --root postgres --instance-dir "$instance" -out=terraform.tfplan
 bun --no-env-file scripts/cloudflare.ts apply --root postgres --instance-dir "$instance" terraform.tfplan
+bun --no-env-file scripts/cloudflare.ts deploy --root postgres --instance-dir "$instance"
 ```
 
 Use Neon's **direct endpoint**, not its pooler, with `sslmode=verify-full`. The
@@ -86,6 +90,7 @@ bun --no-env-file scripts/cloudflare.ts setup --database-provider cloudsql \
 bun --no-env-file scripts/cloudflare.ts init  --root cloudsql --instance-dir "$instance"
 bun --no-env-file scripts/cloudflare.ts plan  --root cloudsql --instance-dir "$instance" -out=terraform.tfplan
 bun --no-env-file scripts/cloudflare.ts apply --root cloudsql --instance-dir "$instance" terraform.tfplan
+bun --no-env-file scripts/cloudflare.ts deploy --root cloudsql --instance-dir "$instance"
 ```
 
 Setup discovers a single accessible Cloudflare account, Cloudflare's published
@@ -167,31 +172,25 @@ After pulling a new app revision into the source checkout:
 
 ```sh
 bun --no-env-file scripts/cloudflare.ts refresh --root postgres --instance-dir "$instance"
-bun --no-env-file scripts/cloudflare.ts init    --root postgres --instance-dir "$instance"
-bun --no-env-file scripts/cloudflare.ts plan    --root postgres --instance-dir "$instance" -out=terraform.tfplan
-bun --no-env-file scripts/cloudflare.ts apply   --root postgres --instance-dir "$instance" terraform.tfplan
+bun --no-env-file scripts/cloudflare.ts deploy  --root postgres --instance-dir "$instance"
 ```
 
 `refresh` changes only `deployment.revision` (the source's `HEAD`). The deploy
-checks the checkout's `HEAD` against it: use a clean checkout. The deploy
-reruns when the revision, the settings, the connection or configuration, or a
-resource it receives changes; the settings digest skips the guided installer's
-own `AZAD_CLI_*` answers, and where the settings file, state and source
-checkout live is not part of it, so moving them does not redeploy. A failed
-deploy retries on the next apply. An explicit redeploy:
+checks the checkout's `HEAD` against it (use a clean checkout) and refuses a
+checkout that does not contain the revision the installation runs, or one a
+deploy already started migrating to. Terraform never deploys the app, so
+changing a setting or a variable can never put an older release back: `plan`
+and `apply` change infrastructure only, and a `deploy` afterwards applies new
+`.env` settings to the running release. Deploying again is also how you retry
+a failed deploy, or redeploy the same revision.
 
-```sh
-bun --no-env-file scripts/cloudflare.ts apply --root postgres --instance-dir "$instance" \
-  -replace='module.base.module.installation.terraform_data.install[0]'
-```
-
-Terraform hides the deploy's output because its input holds the DSN; a failed
-deploy writes its details to `installer-state/last-install-error.txt`.
-
-Back up the whole instance directory: Terraform state and `installer-state/`.
-Generated passwords stay stable through normal applies because Terraform keeps
-them in state. Never delete the installer state or keys to retry a deployment:
-they decrypt the data in the database.
+A failed deploy writes its details to `installer-state/last-install-error.txt`.
+`installer-state/` is a cache: the deploy refills its receipt and Agent Connect
+manifest from the bucket, and writes the generated keys and the release key
+into the Secrets Store as soon as they exist, create-only. The Secrets Store
+gives values back only to a Worker bound to them, so keep the offline copy
+`backup-keys --out DIR` writes, and never delete the installer state or keys
+to retry a deployment: they decrypt the data in the database.
 
 ## Uninstall
 
@@ -204,8 +203,8 @@ custom domain and queue consumer, the Pages project with its domain and CNAME,
 and the Hyperdrive; it empties this installation's R2 buckets so Terraform can
 delete them. Nothing is selected by a pattern alone, so other resources in the
 account are untouched. It keeps your database, your own bucket, the Clerk
-application and the installer state: those keys still decrypt the data in
-your database, so a later apply reinstalls over it. Setting
+application, the keys and the state bucket: those keys still decrypt the data
+in your database, so a later apply and deploy reinstall over it. Setting
 `deployment.enabled = false` on a running instance also uninstalls it.
 
 On the `cloudsql` root, Cloud SQL's deletion protection is on by default. A
@@ -217,10 +216,10 @@ database, which it keeps. To delete the database too, set
 
 | Topic | Resolution |
 | --- | --- |
-| App deployment is not a provider resource graph | `terraform_data` runs the app's own installer after the infrastructure exists. Migrations, builds, secrets and the release mirror stay there. No provisioner runs during plan or validate. |
+| App deployment is not a provider resource graph | `deploy` runs the app's own installer with the handoff Terraform outputs, outside any plan. Migrations, builds, secrets and the release mirror stay there. Only the destroy-time uninstall is a provisioner. |
 | Cloudflare provider coverage | The provider could manage Workers, Pages, D1 and Hyperdrive, but reproducing the Worker configuration and Durable Object migration history would create a second owner. Only fixed R2, queue, DNS and route resources are managed here. |
 | Hyperdrive to Cloud SQL networking | Public IPv4 with explicit authorized networks for both callers. Setup snapshots Cloudflare's published ranges into the variables; Terraform does not refresh them silently. |
 | TLS to Cloud SQL | Encrypted connections are enforced; the DSN uses `sslmode=require`, which encrypts without verifying the server certificate. Existing databases can use `verify-full` with a registered CA. |
 | Secrets | Cloud SQL's generated password and DSN are sensitive but **stored in Terraform state and saved plans**. An existing database's DSN is in saved plans only. Provider tokens come from the private `.env`; app secrets stay there and in the installer state. |
-| State backend | Local state in the instance directory. For a remote backend, replace the root's `backend` block and run Terraform yourself. |
+| State backend | R2's S3 API in the installation's own bucket, with Terraform's create-only lock object (R2 commits a conditional write atomically). R2 keeps no object versions; `init` keeps the local state it moved. |
 | Partial failure and drift | Keep both states and retry. Terraform observes only its own resources; destroy resumes after a partial failure. |

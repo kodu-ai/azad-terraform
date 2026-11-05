@@ -1,7 +1,8 @@
 terraform {
-  # State lives where `init -backend-config=path=...` puts it: the drivers
-  # (scripts/cloudflare.ts, scripts/gcp.ts) keep it in the instance directory.
-  backend "local" {}
+  # State lives in the installation's own GCS bucket, with GCS's native
+  # locking. The drivers (scripts/gcp.ts) create the bucket and point `init`
+  # at it; see scripts/state.ts.
+  backend "gcs" {}
   required_version = ">= 1.13.0, < 2.0.0"
   required_providers {
     google = {

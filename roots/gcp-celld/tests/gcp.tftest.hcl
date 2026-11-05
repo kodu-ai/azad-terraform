@@ -46,8 +46,6 @@ mock_provider "random" {
 }
 
 variables {
-  # The Azad app source checkout; plans never run its entrypoints.
-  source_dir         = "/opt/azad"
   project_id         = "customer-project"
   web_host           = "board.example.com"
   cloudflare_zone_id = "11111111111111111111111111111111"
@@ -115,21 +113,24 @@ run "infrastructure_only_without_a_deployment" {
   }
 }
 
-run "deploys_the_app_after_the_infrastructure" {
+run "hands_the_deploy_its_infrastructure" {
   command = plan
   variables {
     deployment = {
-      revision = "0123456789abcdef0123456789abcdef01234567"
       env_file = "tests/fixtures/settings.env"
     }
   }
   assert {
-    condition     = output.deployment.revision == "0123456789abcdef0123456789abcdef01234567"
-    error_message = "The deploy is keyed to the reviewed revision."
-  }
-  assert {
     condition     = endswith(output.deployment.log, "/roots/gcp-celld/.celld-install/install.log")
     error_message = "The deploy log lives in the persistent state directory beside the root."
+  }
+  assert {
+    condition     = output.deploy.origins.api == "https://api.board.example.com" && output.deploy.fleets.api == "gs://azad-fleet-a1b2c3d4/api" && endswith(output.deploy.env_file, "/tests/fixtures/settings.env")
+    error_message = "The deploy gets the fleets, origins and the absolute settings path."
+  }
+  assert {
+    condition     = !contains(keys(output.deploy), "revision")
+    error_message = "The driver adds the source revision; Terraform does not decide what deploys."
   }
 }
 
@@ -138,7 +139,6 @@ run "deploying_needs_https_origins" {
   variables {
     cloudflare_zone_id = null
     deployment = {
-      revision = "0123456789abcdef0123456789abcdef01234567"
       env_file = "tests/fixtures/settings.env"
     }
   }
@@ -169,7 +169,6 @@ run "project_repositories_live_in_the_cluster_forgejo" {
   command = plan
   variables {
     deployment = {
-      revision = "0123456789abcdef0123456789abcdef01234567"
       env_file = "tests/fixtures/settings.env"
     }
   }
@@ -251,7 +250,6 @@ run "the_api_may_ssh_into_the_cluster_subnet" {
   command = plan
   variables {
     deployment = {
-      revision = "0123456789abcdef0123456789abcdef01234567"
       env_file = "tests/fixtures/settings.env"
     }
   }
@@ -265,7 +263,6 @@ run "further_private_networks_join_the_cluster_subnet" {
   command = plan
   variables {
     deployment = {
-      revision = "0123456789abcdef0123456789abcdef01234567"
       env_file = "tests/fixtures/settings.env"
     }
     ssh_allowed_private_cidrs = ["192.168.50.0/24", "10.212.0.0/20"]
