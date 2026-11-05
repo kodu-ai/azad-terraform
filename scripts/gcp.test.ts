@@ -295,7 +295,7 @@ import { appendFileSync } from "node:fs"
 const args = process.argv.slice(2)
 if (args[1] === "state" && args[2] === "list") process.stdout.write(${JSON.stringify(addresses.map((address) => `${address}\n`).join(""))})
 else if (args[1] === "output") process.stdout.write("null")
-else appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR }) + "\\n")
+else appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR, firstDeployPending: process.env.TF_VAR_first_deploy_pending }) + "\\n")
 `,
     { mode: 0o755 }
   )
@@ -348,6 +348,7 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
         `-out=${join(first.files.directory, "terraform.tfplan")}`,
       ],
       data: first.files.data,
+      firstDeployPending: "false",
     },
   ])
   // Applying that saved plan applies it as reviewed: no second, unreviewed phase.
@@ -389,6 +390,24 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
     `-var-file=${second.files.vars}`,
     `-out=${join(second.files.directory, "terraform.tfplan")}`,
   ])
+})
+
+test("until the first deploy, DNS does not wait for fleets that serve nothing yet", () => {
+  const cluster = "module.gke.google_container_cluster.this"
+  const fresh = initializedInstance([cluster])
+  writeFileSync(join(fresh.source.path, "not-deployed"), "")
+  fresh.gcp("plan", "-out=terraform.tfplan", "--source", fresh.source.path)
+  expect(fresh.calls()[0].firstDeployPending).toBe("true")
+
+  // Once a deploy recorded its receipt, DNS waits on the load balancer again.
+  const deployed = initializedInstance([cluster])
+  deployed.gcp(
+    "plan",
+    "-out=terraform.tfplan",
+    "--source",
+    deployed.source.path
+  )
+  expect(deployed.calls()[0].firstDeployPending).toBe("false")
 })
 
 test("plan, apply, destroy and refresh need the app source checkout", () => {

@@ -3,8 +3,9 @@
  * scripts/self-host entrypoints the drivers require. Its settings.ts speaks
  * the real protocol (JSON on stdin and stdout, exit 65 for a refused setting)
  * with fixed answers, and records each call in `calls.jsonl`; its
- * install-store.ts hands out one fixed lease and records each call (with the
- * handoff it got) in `state-calls.jsonl`.
+ * install-store.ts hands out one fixed lease, reports a deployed installation
+ * unless the checkout holds a `not-deployed` file, and records each call
+ * (with the handoff it got) in `state-calls.jsonl`.
  */
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -35,6 +36,7 @@ const { appendFileSync } = await import("node:fs")
 appendFileSync(new URL("../../state-calls.jsonl", import.meta.url), JSON.stringify({ command, args, state: JSON.parse(process.env.AZAD_INSTALL_STATE ?? "null"), stdin }) + "\\n")
 if (command === "acquire") process.stdout.write(JSON.stringify({ id: "operation-fixture", version: "1" }))
 if (command === "backup") process.stdout.write(args[args.indexOf("--out") + 1])
+if (command === "deployed") process.stdout.write((await Bun.file(new URL("../../not-deployed", import.meta.url)).exists()) ? "false" : "true")
 `
 
 /** Creates the checkout in `directory` and returns its path and HEAD. */

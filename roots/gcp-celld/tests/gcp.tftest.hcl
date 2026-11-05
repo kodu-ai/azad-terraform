@@ -79,6 +79,17 @@ run "dns_only_with_google_certificates" {
   }
 }
 
+run "dns_before_the_first_deploy" {
+  command = plan
+  variables {
+    first_deploy_pending = true
+  }
+  assert {
+    condition     = length(terraform_data.load_balancer_ready) == 0 && length(module.dns) == 1
+    error_message = "Before the first deploy the fleets serve nothing, so the hostnames point at the load balancer without waiting for it."
+  }
+}
+
 run "cloudflare_proxy_with_origin_certificate" {
   command = plan
   variables {

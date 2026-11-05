@@ -453,6 +453,9 @@ async function main() {
   const store = gcpStore(vars.name, vars.project_id)
   const initCommand = commandLine("init")
   const forwardedRaw = forwardedArgs(args)
+  // Set for a plan before the installation's first deploy (see the root's
+  // first_deploy_pending).
+  let firstDeployPending = false
   const terraform: TerraformRun = (terraformArgs, run = {}) => {
     const result = Bun.spawnSync(
       ["terraform", `-chdir=${files.root}`, ...terraformArgs],
@@ -461,6 +464,7 @@ async function main() {
           ...process.env,
           ...terraformEnvironment(files),
           CLOUDFLARE_API_TOKEN: token,
+          TF_VAR_first_deploy_pending: String(firstDeployPending),
         },
         stdin: "inherit",
         stdout: run.capture ? "pipe" : "inherit",
@@ -617,12 +621,16 @@ async function main() {
     )
     return
   }
+  const plans =
+    command === "plan" ||
+    (command === "apply" && !appliesSavedPlan(command, forwarded))
+  // Until a deploy has recorded its receipt, the fleets may serve nothing, so
+  // DNS cannot wait for the load balancer's check. (An installation from
+  // azad 0.0.x gets its receipt into the store on its first apply here.)
+  if (plans && app && clusterExists(addresses))
+    firstDeployPending = !app.deployed()
   process.exitCode = run(() => {
-    if (
-      (command === "plan" ||
-        (command === "apply" && !appliesSavedPlan(command, forwarded))) &&
-      !clusterExists(addresses)
-    ) {
+    if (plans && !clusterExists(addresses)) {
       // Everything else plans against the cluster's API, so a first install
       // creates the cluster on its own; a plan before that covers only it.
       // Clerk's DNS records come along so Clerk can verify them meanwhile.

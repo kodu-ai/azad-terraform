@@ -571,6 +571,10 @@ export function installStore(
     backup(out: string) {
       return run(["backup", "--out", out])
     },
+    /** True once a deploy has recorded the installation's receipt in its store. */
+    deployed() {
+      return run(["deployed"]) === "true"
+    },
   }
 }
 

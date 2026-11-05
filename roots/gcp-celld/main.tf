@@ -75,6 +75,9 @@ resource "terraform_data" "released_volumes" {
 locals {
   dns        = var.cloudflare_zone_id != null
   google_tls = local.dns && !var.cloudflare_proxy
+  # The address DNS uses: the checked load balancer, or before the first
+  # deploy the load balancer's address as it is.
+  origin_address = var.first_deploy_pending ? module.gke.ingress_address.address : one(terraform_data.load_balancer_ready[*].output)
   # Autopilot schedules these pods on amd64 nodes and taints by architecture.
   autopilot_tolerations = [{ key = "kubernetes.io/arch", value = "amd64", operator = "Equal", effect = "NoSchedule" }]
   node_principal        = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/azad/sa"
@@ -200,9 +203,10 @@ module "gateway" {
 # replaced Gateway keeps serving, so a new load balancer takes over without an
 # outage. Its output is the address the records use. The Gateway's name orders
 # it after the routes; depending on the whole module would also wait for the
-# replaced Gateway's removal, which waits for this check.
+# replaced Gateway's removal, which waits for this check. Before the first
+# deploy nothing can serve yet, so the records take the address directly.
 resource "terraform_data" "load_balancer_ready" {
-  count = local.dns ? 1 : 0
+  count = local.dns && !var.first_deploy_pending ? 1 : 0
   input = module.gke.ingress_address.address
   triggers_replace = [
     module.gke.ingress_address.address,
@@ -248,7 +252,7 @@ module "dns" {
   records = { for host in [var.web_host, local.api_host, local.apps_host] : host => {
     name    = host
     type    = "A"
-    content = terraform_data.load_balancer_ready[0].output
+    content = local.origin_address
   } }
 }
 
@@ -257,7 +261,7 @@ module "edge" {
   count           = local.dns && var.cloudflare_proxy ? 1 : 0
   zone_id         = var.cloudflare_zone_id
   hosts           = [var.web_host, local.api_host, local.apps_host]
-  origin_address  = terraform_data.load_balancer_ready[0].output
+  origin_address  = local.origin_address
   manage_ssl_rule = var.manage_ssl_rule
 }
 

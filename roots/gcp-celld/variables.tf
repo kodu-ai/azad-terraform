@@ -73,6 +73,12 @@ variable "deployment" {
   }
 }
 
+variable "first_deploy_pending" {
+  description = "True until the installation's first deploy: its fleets serve nothing before it, so DNS points the hostnames at the load balancer without waiting for healthy backends, and the deploy that follows the apply brings them up. The drivers set it."
+  type        = bool
+  default     = false
+}
+
 variable "ready_timeout_minutes" {
   description = "How long DNS waits for a new load balancer to serve (certificate issuance included), and how long `gcp.ts deploy` waits for the API origin to serve the new revision."
   type        = number

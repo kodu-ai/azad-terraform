@@ -17,7 +17,7 @@ keys in the project's Secret Manager.
 | Database | Cloud SQL for PostgreSQL, reached only through the Cloud SQL Auth Proxy with the API pods' IAM identity (Google's Cloud SQL Proxy Operator injects it; cert-manager serves its webhooks). Each API pod runs PgBouncer, which keeps warm connections through the proxy |
 | Project repositories | Forgejo inside the cluster (official Helm chart), reached only by the API |
 | HTTPS | A GKE Gateway: a regional external Application Load Balancer on a regional static IP, with Google-managed regional certificates (Certificate Manager, DNS authorization) and a proxy-only subnet in the default VPC (`10.127.0.0/23` unless `proxy_only_subnet_range` says otherwise) |
-| DNS | `A` records for `<host>`, `api.<host>` and `*.apps.<host>`, the certificate validation CNAMEs and Clerk's CNAMEs, in your Cloudflare zone. The `A` records are written only once the load balancer serves all three hosts over HTTPS. Existing records are never changed |
+| DNS | `A` records for `<host>`, `api.<host>` and `*.apps.<host>`, the certificate validation CNAMEs and Clerk's CNAMEs, in your Cloudflare zone. The `A` records are written only once the load balancer serves all three hosts over HTTPS (on a first install, before anything is deployed, right away). Existing records are never changed |
 | Mini Apps | Run inside the API fleet, served at `<app>.apps.<host>` |
 | Agent machine (optional) | One Compute Engine VM for agents, `<name>-agents`, without a public address; only the cluster's pods reach its SSH |
 | Disk backups | Backup for GKE snapshots of the `azad` namespace's disks on the schedule chosen at setup |
@@ -34,7 +34,8 @@ Cloud SQL, Certificate Manager and Secret Manager APIs it needs.
 
 - A Google Cloud project with billing where you can create clusters, Cloud SQL
   instances, buckets and IAM bindings (Owner, or Editor plus Project IAM
-  Admin).
+  Admin, Kubernetes Engine Admin and Secret Manager Secret Accessor: Editor
+  alone cannot create Kubernetes roles or read the installation's keys back).
 - The domain's zone in your Cloudflare account, and a Cloudflare token with
   Zone Read, DNS Write, SSL and Certificates Write and Config Settings Write on
   that zone ([docs/token-bootstrap.md](token-bootstrap.md) can mint it).
