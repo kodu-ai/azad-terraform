@@ -123,3 +123,9 @@ variable "source_dir" {
   type        = string
   default     = null
 }
+
+variable "updater_image" {
+  description = "The updater image for console release updates (see the root's updater_image); null keeps updates to the CLI."
+  type        = string
+  default     = null
+}

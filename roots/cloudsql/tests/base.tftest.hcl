@@ -68,6 +68,21 @@ run "installer_handoff" {
   }
 }
 
+run "the_installer_gets_the_pinned_updater_image" {
+  command = plan
+  variables {
+    deployment = {
+      env_file        = "tests/fixtures/settings.env"
+      state_directory = ".installer-state"
+    }
+    updater_image = "ghcr.io/kodu-ai/azad-updater@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  }
+  assert {
+    condition     = output.deploy.updater.image == var.updater_image
+    error_message = "The installer copies exactly the pinned image and deploys the updater Worker with it."
+  }
+}
+
 run "reject_invalid_network" {
   command = plan
   variables {
