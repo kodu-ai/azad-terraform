@@ -55,11 +55,18 @@ import {
   REPOSITORY,
   rootNamed,
   terraformArguments,
-  terraformEnvironment,
   writePrivate,
   type InstanceTerraform,
 } from "./instance"
 import { readEnvFile, type Fetcher } from "./lib"
+import {
+  assertOwnInitialized,
+  assertStateHere,
+  bucketConfiguration,
+  initOwnBackend,
+  ownBackend,
+  ownBackendFile,
+} from "./own-backend"
 import {
   assertMoved,
   configureBackend,
@@ -370,11 +377,13 @@ async function main() {
   )
   assertBackend(files)
   // The source is checked before anything is read from the network or written.
-  // init needs it only to move a local state, under the operation record.
+  // init needs it only to move a local state or point the bucket at the
+  // installation's own backend, under the operation record.
   const source =
     SOURCE_COMMANDS.has(command) ||
     changingPhase(command, forwardedArgs(args)) !== undefined ||
-    (command === "init" && localState(files) !== undefined)
+    (command === "init" &&
+      (localState(files) !== undefined || existsSync(ownBackendFile(files))))
       ? requireSource(options.source)
       : undefined
   const commandLine = (name: string) =>
@@ -456,30 +465,36 @@ async function main() {
   // Set for a plan before the installation's first deploy (see the root's
   // first_deploy_pending).
   let firstDeployPending = false
-  const terraform: TerraformRun = (terraformArgs, run = {}) => {
-    const result = Bun.spawnSync(
-      ["terraform", `-chdir=${files.root}`, ...terraformArgs],
-      {
-        env: {
-          ...process.env,
-          ...terraformEnvironment(files),
-          CLOUDFLARE_API_TOKEN: token,
-          TF_VAR_first_deploy_pending: String(firstDeployPending),
-          // The updater's grants reach only this bucket's install/ objects
-          // and secrets (modules/gcp/updater).
-          TF_VAR_install_bucket: store.bucket,
-        },
-        stdin: "inherit",
-        stdout: run.capture ? "pipe" : "inherit",
-        stderr: "inherit",
+  // With a backend_override.tf, Terraform runs in the installation's copy of
+  // the root with that backend.
+  const own = ownBackend(files)
+  const runner =
+    (where: { root: string; data: string }): TerraformRun =>
+    (terraformArgs, run = {}) => {
+      const result = Bun.spawnSync(
+        ["terraform", `-chdir=${where.root}`, ...terraformArgs],
+        {
+          env: {
+            ...process.env,
+            TF_DATA_DIR: where.data,
+            CLOUDFLARE_API_TOKEN: token,
+            TF_VAR_first_deploy_pending: String(firstDeployPending),
+            // The updater's grants reach only this bucket's install/ objects
+            // and secrets (modules/gcp/updater).
+            TF_VAR_install_bucket: store.bucket,
+          },
+          stdin: "inherit",
+          stdout: run.capture ? "pipe" : "inherit",
+          stderr: "inherit",
+        }
+      )
+      return {
+        // Terraform stopped by a signal has no exit code; that is a failure.
+        status: result.exitCode ?? 1,
+        stdout: run.capture ? (result.stdout?.toString() ?? "") : "",
       }
-    )
-    return {
-      // Terraform stopped by a signal has no exit code; that is a failure.
-      status: result.exitCode ?? 1,
-      stdout: run.capture ? (result.stdout?.toString() ?? "") : "",
     }
-  }
+  const terraform = runner(own ?? { root: files.root, data: files.data })
   const app =
     source &&
     installStore(source, {
@@ -491,6 +506,17 @@ async function main() {
   if (command === "init") {
     mkdirSync(files.directory, { recursive: true, mode: 0o700 })
     await configureBackend(files, store, { token, location: vars.region })
+    if (own) {
+      if (!app) throw new SetupError(USAGE)
+      process.exitCode = initOwnBackend({
+        files,
+        runs: { bucket: runner(bucketConfiguration(files)), own: terraform },
+        forwarded: forwardedRaw,
+        store: app,
+        takeOver: options["take-over"],
+      })
+      return
+    }
     let status = terraform([
       "init",
       ...terraformArguments("init", forwardedRaw, files),
@@ -511,13 +537,20 @@ async function main() {
           `Moved this installation's Terraform state into the GCS bucket ${store.bucket}; the local copy is kept as ${kept}.\n`
         )
     }
+    if (status === 0) assertStateHere(terraform, files, initCommand)
     process.exitCode = status
     return
   }
   readBackendRecord(files, initCommand)
-  assertInitialized(files, store.bucket, initCommand)
+  if (own) assertOwnInitialized(own, files, initCommand)
+  else assertInitialized(files, store.bucket, initCommand)
   // force-unlock stays possible: a move that crashed may hold Terraform's lock.
-  if (command !== "force-unlock") assertMoved(files, initCommand)
+  if (command !== "force-unlock") {
+    assertMoved(files, initCommand)
+    // state push stays possible: it is how a state comes back to the bucket.
+    if (!own && !(command === "state" && forwardedRaw[0] === "push"))
+      assertStateHere(terraform, files, initCommand)
+  }
   /** The full installer handoff: Terraform's output, the revision and where state lives. */
   const handoff = (lease: string) => {
     const deploy = deployOutput(terraform)

@@ -134,6 +134,9 @@ Each installation owns one directory, outside this repository:
     .terraform/                 Terraform's working data (TF_DATA_DIR)
     installer-state/            Cloudflare: the deploy's cache of keys and receipt
     celld-install/              Google Cloud: the same, plus tools and install.log
+    backend_override.tf         optional: the installation's own backend (you write it)
+    own-backend/, .terraform-own/   with it: the root's copy and working data
+    bucket-state/               with it: a backend-only configuration for the bucket
 ```
 
 Each root declares `backend "s3" {}` (Cloudflare) or `backend "gcs" {}`
@@ -146,6 +149,35 @@ such a state into the bucket: it pushes the file, reads it back and compares
 its resources and outputs, and only then renames it to
 `terraform.tfstate.before-remote-<time>`. A bucket that already holds a
 different state is never written.
+
+### An own backend
+
+A `backend_override.tf` in the root's directory replaces the root's backend
+block with any other backend or a `cloud` block (see `scripts/own-backend.ts`).
+Terraform reads override files only beside the root, and the release
+directory is shared by every installation on the machine, so the drivers copy
+this release's `roots/<root>` and `modules` to `own-backend/` with the file,
+again whenever either changes, and run Terraform there with `.terraform-own/`
+as its working data. They pass that backend no R2 credentials and add no
+`-backend-config` or `-reconfigure` to its `init`, so your own init arguments
+(`-migrate-state`, partial configuration) reach it unchanged.
+
+`init` then holds the operation record while it makes the bucket point there.
+`bucket-state/` reads and writes the bucket's state without the root's
+providers. When the own backend holds no state, `init` pushes the bucket's
+(or a local state of a release before 0.1.0), reads it back and compares
+resources and outputs, keeps a copy as
+`terraform.tfstate.before-own-backend-<time>`, and only then replaces the
+bucket's state with a pointer: no resources, and one output,
+`azad_state_moved`, naming the backend type and the lineage of the state it
+holds. A backend that already holds the same resources and outputs is
+recorded as it is. One holding a different state is refused, and nothing is
+written.
+
+From then on, an own backend is accepted only while its state has the
+recorded lineage (Terraform's `init -migrate-state` keeps it), and every
+command against the bucket refuses to run, except `state push`, which brings
+a state back.
 
 The deploy's directories, saved plans and `.env` hold passwords and signing
 keys: keep the instance directory private.

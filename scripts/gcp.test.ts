@@ -11,6 +11,7 @@ import { join } from "node:path"
 import { fakeSource } from "./fixtures/source"
 import { gcpName, prepareGcp } from "./gcp"
 import { instanceTerraform, REPOSITORY } from "./instance"
+import { ownBackendFile } from "./own-backend"
 import { gcpStore } from "./state"
 import { SettingsRefused, type AppSettings } from "./source"
 
@@ -293,7 +294,8 @@ function initializedInstance(addresses: string[]) {
     `#!/usr/bin/env -S bun --no-env-file
 import { appendFileSync } from "node:fs"
 const args = process.argv.slice(2)
-if (args[1] === "state" && args[2] === "list") process.stdout.write(${JSON.stringify(addresses.map((address) => `${address}\n`).join(""))})
+if (args[1] === "state" && args[2] === "pull") {}
+else if (args[1] === "state" && args[2] === "list") process.stdout.write(${JSON.stringify(addresses.map((address) => `${address}\n`).join(""))})
 else if (args[1] === "output") process.stdout.write("null")
 else {
   appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR, firstDeployPending: process.env.TF_VAR_first_deploy_pending }) + "\\n")
@@ -446,6 +448,47 @@ test("every Terraform run gets the installation's state bucket, which the update
   expect(instance.store.bucket).toBe(
     gcpStore("azad-board-1234", "customer-project").bucket
   )
+})
+
+test("with a backend_override.tf, commands run in the installation's copy of the root, with its own working data", () => {
+  const instance = initializedInstance([
+    "module.gke.google_container_cluster.this",
+  ])
+  writeFileSync(
+    ownBackendFile(instance.files),
+    'terraform {\n  backend "gcs" {\n    bucket = "team-state"\n  }\n}\n'
+  )
+  const plan = () =>
+    instance.gcp(
+      "plan",
+      "-out=terraform.tfplan",
+      "--source",
+      instance.source.path
+    )
+  const refused = plan()
+  expect(refused.exitCode).toBe(1)
+  expect(refused.stderr.toString()).toContain("not initialized yet")
+  const data = join(instance.files.directory, ".terraform-own")
+  mkdirSync(data, { recursive: true })
+  writeFileSync(
+    join(data, "terraform.tfstate"),
+    JSON.stringify({ backend: { type: "gcs" } })
+  )
+  expect(plan().exitCode).toBe(0)
+  expect(instance.calls()).toEqual([
+    {
+      args: [
+        `-chdir=${join(instance.files.directory, "own-backend", "roots", "gcp-celld")}`,
+        "plan",
+        `-var-file=${instance.files.vars}`,
+        `-out=${join(instance.files.directory, "terraform.tfplan")}`,
+      ],
+      data,
+      firstDeployPending: "false",
+    },
+  ])
+  // The updater's grants still name the installation's bucket.
+  expect(instance.buckets()).toEqual([instance.store.bucket])
 })
 
 test("plan, apply, destroy and refresh need the app source checkout", () => {
