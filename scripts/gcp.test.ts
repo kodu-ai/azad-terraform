@@ -365,15 +365,21 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
     "-input=false",
     join(first.files.directory, "terraform.tfplan"),
   ])
-  // The apply held the installation's operation record, and released it.
-  const held = readFileSync(
+  // The plan asked whether a deploy happened; the apply held the
+  // installation's operation record, and released it.
+  const calls = readFileSync(
     join(first.source.path, "state-calls.jsonl"),
     "utf8"
   )
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line))
-  expect(held.map((call) => call.command)).toEqual(["acquire", "finish"])
+  expect(calls.map((call) => call.command)).toEqual([
+    "deployed",
+    "acquire",
+    "finish",
+  ])
+  const held = calls.slice(1)
   expect(held[0].args.slice(0, 2)).toEqual(["--phase", "terraform-apply"])
   expect(held[0].state.store).toEqual(
     gcpStore("azad-board-1234", "customer-project")
@@ -398,6 +404,15 @@ test("until the first deploy, DNS does not wait for fleets that serve nothing ye
   writeFileSync(join(fresh.source.path, "not-deployed"), "")
   fresh.gcp("plan", "-out=terraform.tfplan", "--source", fresh.source.path)
   expect(fresh.calls()[0].firstDeployPending).toBe("true")
+
+  // A direct apply before the cluster exists also runs the full apply.
+  const direct = initializedInstance([])
+  writeFileSync(join(direct.source.path, "not-deployed"), "")
+  direct.gcp("apply", "-input=false", "--source", direct.source.path)
+  expect(direct.calls().map((call) => call.firstDeployPending)).toEqual([
+    "true",
+    "true",
+  ])
 
   // Once a deploy recorded its receipt, DNS waits on the load balancer again.
   const deployed = initializedInstance([cluster])

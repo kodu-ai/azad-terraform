@@ -627,8 +627,9 @@ async function main() {
   // Until a deploy has recorded its receipt, the fleets may serve nothing, so
   // DNS cannot wait for the load balancer's check. (An installation from
   // azad 0.0.x gets its receipt into the store on its first apply here.)
-  if (plans && app && clusterExists(addresses))
-    firstDeployPending = !app.deployed()
+  // A direct apply before the cluster exists runs the full apply right after
+  // the cluster's, so the flag is set for both.
+  if (plans && app) firstDeployPending = !app.deployed()
   process.exitCode = run(() => {
     if (plans && !clusterExists(addresses)) {
       // Everything else plans against the cluster's API, so a first install
