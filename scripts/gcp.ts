@@ -61,9 +61,11 @@ import {
 } from "./instance"
 import { readEnvFile, type Fetcher } from "./lib"
 import {
+  assertMoved,
   configureBackend,
   gcpStore,
   installStore,
+  localState,
   moveLocalState,
   readBackendRecord,
   withOperation,
@@ -368,9 +370,11 @@ async function main() {
   )
   assertBackend(files)
   // The source is checked before anything is read from the network or written.
+  // init needs it only to move a local state, under the operation record.
   const source =
     SOURCE_COMMANDS.has(command) ||
-    changingPhase(command, forwardedArgs(args)) !== undefined
+    changingPhase(command, forwardedArgs(args)) !== undefined ||
+    (command === "init" && localState(files) !== undefined)
       ? requireSource(options.source)
       : undefined
   const commandLine = (name: string) =>
@@ -468,15 +472,32 @@ async function main() {
       stdout: run.capture ? (result.stdout?.toString() ?? "") : "",
     }
   }
+  const app =
+    source &&
+    installStore(source, {
+      store,
+      kind: "celld",
+      env_file: vars.deployment.env_file,
+      state_directory: vars.deployment.state_directory,
+    })
   if (command === "init") {
     mkdirSync(files.directory, { recursive: true, mode: 0o700 })
     await configureBackend(files, store, { token, location: vars.region })
-    const status = terraform([
+    let status = terraform([
       "init",
       ...terraformArguments("init", forwardedRaw, files),
     ]).status
-    if (status === 0) {
-      const kept = moveLocalState(files, terraform)
+    if (status === 0 && app && localState(files)) {
+      let kept: string | undefined
+      status = withOperation(
+        app,
+        "terraform-state-move",
+        { takeOver: options["take-over"] },
+        () => {
+          kept = moveLocalState(files, terraform)
+          return 0
+        }
+      )
       if (kept)
         process.stdout.write(
           `Moved this installation's Terraform state into the GCS bucket ${store.bucket}; the local copy is kept as ${kept}.\n`
@@ -487,14 +508,7 @@ async function main() {
   }
   readBackendRecord(files, initCommand)
   assertInitialized(files, store.bucket, initCommand)
-  const app =
-    source &&
-    installStore(source, {
-      store,
-      kind: "celld",
-      env_file: vars.deployment.env_file,
-      state_directory: vars.deployment.state_directory,
-    })
+  assertMoved(files, initCommand)
   /** The full installer handoff: Terraform's output, the revision and where state lives. */
   const handoff = (lease: string) => {
     const deploy = deployOutput(terraform)
@@ -502,11 +516,18 @@ async function main() {
       throw new SetupError(
         "This installation has no deployment: its variables set none."
       )
+    const held = z
+      .object({ id: z.string(), version: z.string() })
+      .parse(JSON.parse(lease))
     return {
       ...deploy,
+      // This machine's files: the output names those of the last apply.
+      env_file: vars.deployment.env_file,
+      state_directory: vars.deployment.state_directory,
       revision: vars.deployment.revision,
       install_store: store,
-      operation_id: z.object({ id: z.string() }).parse(JSON.parse(lease)).id,
+      operation_id: held.id,
+      operation_version: held.version,
     }
   }
   if (command === "backup-keys") {
@@ -521,7 +542,7 @@ async function main() {
     process.exitCode = withOperation(
       app,
       "deploy",
-      options["take-over"],
+      { takeOver: options["take-over"], revision: vars.deployment.revision },
       (lease) => {
         const input = handoff(lease)
         app.publish(lease, JSON.stringify(input), REPOSITORY)
@@ -564,14 +585,19 @@ async function main() {
   const run = (work: () => number) => {
     const phase = changingPhase(command, forwardedRaw)
     if (!phase || !app) return work()
-    return withOperation(app, phase, options["take-over"], (lease) => {
-      const status = work()
-      // The deployment object tells release updates what this infrastructure
-      // provides; it is written after every apply that completes it.
-      if (status === 0 && command === "apply" && deployOutput(terraform))
-        app.publish(lease, JSON.stringify(handoff(lease)), REPOSITORY)
-      return status
-    })
+    return withOperation(
+      app,
+      phase,
+      { takeOver: options["take-over"] },
+      (lease) => {
+        const status = work()
+        // The deployment object tells release updates what this infrastructure
+        // provides; it is written after every apply that completes it.
+        if (status === 0 && command === "apply" && deployOutput(terraform))
+          app.publish(lease, JSON.stringify(handoff(lease)), REPOSITORY)
+        return status
+      }
+    )
   }
   if (command === "destroy" && addresses.length && !clusterExists(addresses)) {
     // A destroy that stopped after the cluster went cannot plan the Kubernetes

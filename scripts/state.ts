@@ -18,9 +18,12 @@
  * deploy's state directory.
  *
  * Every command that changes the installation (apply, destroy, import, the
- * state commands that write, deploy) holds the install-wide operation record
- * while it runs, through the app checkout's `scripts/self-host/install-store.ts`,
- * so it never overlaps a release update from the console or another machine.
+ * state commands that write, deploy, and init when it moves a local state)
+ * holds the install-wide operation record while it runs, through the app
+ * checkout's `scripts/self-host/install-store.ts`, so it never overlaps a
+ * release update from the console or another machine. A record another run
+ * holds is taken over only with `--take-over <operation id>`, once the
+ * operator confirmed that run and every process it started have stopped.
  */
 import { createHash } from "node:crypto"
 import { copyFileSync, existsSync, readFileSync, renameSync } from "node:fs"
@@ -408,6 +411,18 @@ export function localState(files: InstanceTerraform) {
   return state.resources.length ? state : undefined
 }
 
+/**
+ * Refuses a command while the instance still holds the local state of a
+ * release before 0.1.0: the bucket does not have it yet, so a plan would see
+ * an empty installation.
+ */
+export function assertMoved(files: InstanceTerraform, init: string): void {
+  if (localState(files))
+    throw new InstanceError(
+      `${files.state} still holds this installation's Terraform state from a release before 0.1.0; it is not in the state bucket yet. Run:\n  ${init}`
+    )
+}
+
 /** Runs Terraform in the root; returns its exit status and captured stdout. */
 export type TerraformRun = (
   args: string[],
@@ -421,7 +436,9 @@ export type TerraformRun = (
  * renamed out of the way, where no release reads it as current. A bucket that already
  * holds exactly this state (an interrupted move) is accepted; one that holds
  * any other state is never written. Run after `init` configured the remote
- * backend.
+ * backend, holding the installation's operation record; until the local
+ * file is renamed, the drivers refuse every other command
+ * ({@link assertMoved}).
  *
  * @returns The copy kept beside the instance's other files, or undefined
  *   when there was nothing to move.
@@ -444,15 +461,24 @@ export function moveLocalState(
       )
     if (!pulled.stdout.trim()) return undefined
     const state = localStateSchema.parse(JSON.parse(pulled.stdout))
-    // A backend without a state answers with an empty one: no lineage.
-    return state.lineage ? state : undefined
+    // A backend without a state answers with an empty one, which GCS also
+    // gives a fresh lineage: nothing is recorded in it.
+    return state.resources.length || Object.keys(state.outputs).length
+      ? state
+      : undefined
   }
   const remote = pull()
   if (remote && contents(remote) !== contents(local))
     throw new InstanceError(
       `The state bucket already holds a different state. Nothing was moved; the local state in ${files.state} is unchanged.`
     )
-  if (!remote && terraform(["state", "push", files.state]).status !== 0)
+  // -force: the empty state Terraform created there has another lineage.
+  // The caller holds the installation's operation record, so nothing else
+  // writes the bucket's state meanwhile.
+  if (
+    !remote &&
+    terraform(["state", "push", "-force", files.state]).status !== 0
+  )
     throw new InstanceError(
       `Terraform did not move the local state into the bucket; ${files.state} is unchanged.`
     )
@@ -502,14 +528,18 @@ export function installStore(
     return result.stdout.toString().trim()
   }
   return {
-    /** Takes the install-wide operation record for `phase`; returns the lease. */
-    acquire(phase: string, takeOver?: string) {
+    /**
+     * Takes the install-wide operation record for `phase`, journaling the
+     * source revision a deploy installs; returns the lease.
+     */
+    acquire(phase: string, takeOver?: string, revision?: string) {
       return run([
         "acquire",
         "--phase",
         phase,
         "--executor",
         `cli:${hostname()}:${process.pid}`,
+        ...(revision ? ["--revision", revision] : []),
         ...(takeOver ? ["--confirm-stopped", takeOver] : []),
       ])
     },
@@ -529,7 +559,9 @@ export function installStore(
           "--infrastructure",
           JSON.stringify(INFRASTRUCTURE),
           "--cli",
-          process.env.AZAD_CLI_VERSION?.trim() || "-",
+          /^\d+\.\d+\.\d+$/u.test(process.env.AZAD_CLI_VERSION ?? "")
+            ? (process.env.AZAD_CLI_VERSION ?? "-")
+            : "-",
           "--terraform",
           terraformVersion(repository),
         ],
@@ -548,12 +580,12 @@ export function installStore(
  * reaches the Terraform child; this process stays to release the record.
  */
 export function withOperation(
-  store: ReturnType<typeof installStore>,
+  store: Pick<ReturnType<typeof installStore>, "acquire" | "finish" | "stop">,
   phase: string,
-  takeOver: string | undefined,
+  options: { takeOver?: string; revision?: string },
   work: (lease: string) => number
 ): number {
-  const lease = store.acquire(phase, takeOver)
+  const lease = store.acquire(phase, options.takeOver, options.revision)
   const ignore = () => {}
   process.on("SIGINT", ignore)
   process.on("SIGTERM", ignore)

@@ -107,10 +107,13 @@ copy.
 
 The operation record makes the installation change one way at a time:
 Terraform runs, deploys and (from the console) release updates. It is taken
-with a conditional write and never taken over because it looks old: a run of
-this machine whose process exited counts as stopped; any other needs
-`--take-over <operation id>` once you have confirmed it stopped. A failed run
-leaves the record stopped, and the next run resumes it.
+with a conditional write and never taken over because it looks old: a record
+another run holds needs `--take-over <operation id>`, once you have confirmed
+that run and everything it started have stopped. The deploy checks its lease
+before each change and before it records anything, so a run that was taken
+over stops. A failed run leaves the record stopped and the next run resumes
+it; a failed deploy keeps its revision there, so only that revision or a
+later one finishes it.
 
 ## The instance directory
 

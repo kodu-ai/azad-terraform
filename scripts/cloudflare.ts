@@ -32,10 +32,12 @@ import {
 } from "./instance"
 import { readEnvFile, type Fetcher } from "./lib"
 import {
+  assertMoved,
   backendEnvironment,
   cloudflareStore,
   configureBackend,
   installStore,
+  localState,
   moveLocalState,
   readBackendRecord,
   withOperation,
@@ -759,9 +761,11 @@ async function main() {
   )
   assertBackend(files)
   // The source is checked before anything is read from the network or written.
+  // init needs it only to move a local state, under the operation record.
   const source: Source | undefined =
     SOURCE_COMMANDS.has(command) ||
     changingPhase(command, forwardedArgs(args)) !== undefined ||
+    (command === "init" && localState(files) !== undefined) ||
     (OPTIONAL_SOURCE_COMMANDS.has(command) &&
       sourceOption(options.source) !== undefined)
       ? requireSource(options.source)
@@ -901,15 +905,32 @@ async function main() {
       stdout: run.capture ? (result.stdout?.toString() ?? "") : "",
     }
   }
+  const app =
+    source &&
+    installStore(source, {
+      store,
+      kind: "cloudflare",
+      env_file: config.deployment.env_file,
+      state_directory: config.deployment.state_directory,
+    })
   if (command === "init") {
     mkdirSync(files.directory, { recursive: true, mode: 0o700 })
     initRecord = await configureBackend(files, store, { token })
-    const status = terraform([
+    let status = terraform([
       "init",
       ...terraformArguments("init", forwardedRaw, files),
     ]).status
-    if (status === 0) {
-      const kept = moveLocalState(files, terraform)
+    if (status === 0 && app && localState(files)) {
+      let kept: string | undefined
+      status = withOperation(
+        app,
+        "terraform-state-move",
+        { takeOver: options["take-over"] },
+        () => {
+          kept = moveLocalState(files, terraform)
+          return 0
+        }
+      )
       if (kept)
         process.stdout.write(
           `Moved this installation's Terraform state into the R2 bucket ${store.bucket}; the local copy is kept as ${kept}.\n`
@@ -919,14 +940,7 @@ async function main() {
     return
   }
   assertInitialized(files, store.bucket, initCommand)
-  const app =
-    source &&
-    installStore(source, {
-      store,
-      kind: "cloudflare",
-      env_file: config.deployment.env_file,
-      state_directory: config.deployment.state_directory,
-    })
+  assertMoved(files, initCommand)
   /** The full installer handoff: Terraform's outputs, the revision and the database URL. */
   const handoff = (lease: string) => {
     const outputs = terraformOutputs(terraform)
@@ -934,12 +948,17 @@ async function main() {
       throw new SetupError(
         "This installation has no deployment (deployment.enabled is false)."
       )
+    const held = leaseSchema.parse(JSON.parse(lease))
     return {
       ...outputs.deploy,
+      // This machine's files: the output names those of the last apply.
+      env_file: config.deployment.env_file,
+      state_directory: config.deployment.state_directory,
       revision: config.deployment.revision,
       database_url: outputs.database_url ?? env.DATABASE_URL ?? "",
       install_store: store,
-      operation_id: leaseId(lease),
+      operation_id: held.id,
+      operation_version: held.version,
     }
   }
   if (command === "backup-keys") {
@@ -954,7 +973,7 @@ async function main() {
     process.exitCode = withOperation(
       app,
       "deploy",
-      options["take-over"],
+      { takeOver: options["take-over"], revision: config.deployment.revision },
       (lease) => {
         const input = handoff(lease)
         app.publish(lease, JSON.stringify(input), REPOSITORY)
@@ -992,7 +1011,7 @@ async function main() {
   process.exitCode = withOperation(
     app,
     phase,
-    options["take-over"],
+    { takeOver: options["take-over"] },
     (lease) => {
       const status = terraform([command, ...forwarded]).status
       // The deployment object tells release updates what this infrastructure
@@ -1026,10 +1045,8 @@ function terraformOutputs(terraform: TerraformRun) {
   return { deploy, database_url: databaseUrl ?? undefined }
 }
 
-/** The operation id inside a lease the app's install-store.ts printed. */
-function leaseId(lease: string): string {
-  return z.object({ id: z.string() }).parse(JSON.parse(lease)).id
-}
+/** A lease the app's install-store.ts printed. */
+const leaseSchema = z.object({ id: z.string(), version: z.string() })
 
 if (import.meta.main) {
   try {

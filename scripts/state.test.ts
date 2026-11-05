@@ -17,6 +17,7 @@ import {
   terraformArguments,
 } from "./instance"
 import {
+  assertMoved,
   backendConfig,
   backendEnvironment,
   cloudflarePrefix,
@@ -177,7 +178,7 @@ function remoteBackend(initial?: object) {
     if (args[0] === "state" && args[1] === "pull")
       return { status: 0, stdout: remote }
     if (args[0] === "state" && args[1] === "push") {
-      remote = readFileSync(args[2] ?? "", "utf8")
+      remote = readFileSync(args.at(-1) ?? "", "utf8")
       return { status: 0, stdout: "" }
     }
     return { status: 1, stdout: "" }
@@ -237,6 +238,30 @@ test("an interrupted move finishes; another installation's state is never overwr
   expect(JSON.parse(backend.remote()).lineage).toBe("lineage-b")
 })
 
+test("the empty state GCS creates with its own lineage counts as empty", () => {
+  const files = instance("gcp-celld")
+  writeFileSync(files.state, JSON.stringify(localState))
+  const backend = remoteBackend({
+    version: 4,
+    serial: 1,
+    lineage: "gcs-generated",
+    resources: [],
+    outputs: {},
+  })
+  expect(moveLocalState(files, backend.run)).toBeDefined()
+  expect(JSON.parse(backend.remote()).resources).toEqual(localState.resources)
+})
+
+test("until the move completes, every other command is refused", () => {
+  const files = instance()
+  writeFileSync(files.state, JSON.stringify(localState))
+  expect(() => assertMoved(files, "the init command")).toThrow(
+    "the init command"
+  )
+  writeFileSync(files.state, JSON.stringify({ ...localState, resources: [] }))
+  expect(() => assertMoved(files, "init")).not.toThrow()
+})
+
 test("a local state without resources is left alone", () => {
   const files = instance()
   writeFileSync(files.state, JSON.stringify({ ...localState, resources: [] }))
@@ -247,8 +272,8 @@ test("a local state without resources is left alone", () => {
 test("a command that changes the installation holds the operation record until it ends", () => {
   const calls: string[] = []
   const store = {
-    acquire: (phase: string, takeOver?: string) => {
-      calls.push(`acquire ${phase} ${takeOver ?? "-"}`)
+    acquire: (phase: string, takeOver?: string, revision?: string) => {
+      calls.push(`acquire ${phase} ${takeOver ?? "-"} ${revision ?? "-"}`)
       return '{"id":"op","version":"1"}'
     },
     finish: () => {
@@ -257,15 +282,20 @@ test("a command that changes the installation holds the operation record until i
     stop: (_lease: string, error: string) => {
       calls.push(`stop ${error}`)
     },
-    publish: () => undefined,
-    backup: () => "",
   }
-  expect(withOperation(store, "terraform-apply", undefined, () => 0)).toBe(0)
-  expect(withOperation(store, "deploy", "op-0", () => 2)).toBe(2)
+  expect(withOperation(store, "terraform-apply", {}, () => 0)).toBe(0)
+  expect(
+    withOperation(
+      store,
+      "deploy",
+      { takeOver: "op-0", revision: "abc" },
+      () => 2
+    )
+  ).toBe(2)
   expect(calls).toEqual([
-    "acquire terraform-apply -",
+    "acquire terraform-apply - -",
     "finish",
-    "acquire deploy op-0",
+    "acquire deploy op-0 abc",
     "stop deploy exited with status 2.",
   ])
   expect(changingPhase("apply", [])).toBe("terraform-apply")

@@ -947,3 +947,55 @@ test("managed project source gets this installation's own Artifacts namespace", 
   )
   expect(env.V3_CF_ACCOUNT_ID).toBe("0".repeat(32))
 })
+
+test("deploy hands the installer this machine's files, the recorded revision and the held lease", async () => {
+  const f = layout("terraform-cloudflare-deploy-")
+  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  saveCloudflare(f.files, result, f.credentialsFile)
+  initialized(f.files)
+  // The last apply ran on another machine: its paths are in the output.
+  const output = {
+    deploy: {
+      value: {
+        resource_prefix: "azad-api-board-example-com-7ec551c7",
+        env_file: "/elsewhere/.env",
+        state_directory: "/elsewhere/installer-state",
+      },
+    },
+  }
+  const bin = echoTerraform(
+    f.directory,
+    `process.stdout.write(${JSON.stringify(JSON.stringify(output))})`
+  )
+  const deploy = driver(
+    [
+      "deploy",
+      "--root",
+      f.root,
+      "--source",
+      f.source.path,
+      "--instance-dir",
+      f.files.instance,
+    ],
+    { PATH: `${bin}:${process.env.PATH}` }
+  )
+  expect(deploy.stderr.toString()).toBe("")
+  expect(deploy.exitCode).toBe(0)
+  const calls = stateCalls(f.source)
+  expect(calls.map((call) => call.command)).toEqual([
+    "acquire",
+    "publish",
+    "finish",
+  ])
+  expect(calls[0].args).toEqual(
+    expect.arrayContaining(["--phase", "deploy", "--revision", "a".repeat(40)])
+  )
+  expect(calls[1].stdin).toMatchObject({
+    env_file: f.files.settings,
+    state_directory: join(f.files.directory, "installer-state"),
+    revision: "a".repeat(40),
+    install_store: fixtureStore,
+    operation_id: "operation-fixture",
+    operation_version: "1",
+  })
+})

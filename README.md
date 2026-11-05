@@ -234,13 +234,15 @@ stays the same).
 
 ### One change at a time
 
-`apply`, `destroy`, `import`, the `state` commands that write and `deploy`
-hold the installation's operation record while they run, so they never
-overlap each other or a release update. If a run stopped on another machine
-(or a crash left its record), confirm it is no longer running, then pass
-`--take-over <operation id>` (the refusal names it). A run of this machine
-whose process exited is taken over without asking. Terraform's own state lock
-works the same way: after a killed run, `force-unlock <lock id>` releases it.
+`apply`, `destroy`, `import`, the `state` commands that write, `deploy` and an
+`init` that moves a local state hold the installation's operation record
+while they run, so they never overlap each other or a release update. If a
+run was killed or a machine went away, its record stays: once you have
+confirmed that run and everything it started (such as a deploy still
+running) have stopped, pass `--take-over <operation id>` (the refusal names
+it). A deploy that failed keeps its revision: the next deploy must install
+that revision or a later one. Terraform's own state lock works the same way:
+after a killed run, `force-unlock <lock id>` releases it.
 
 ## Destroying
 
