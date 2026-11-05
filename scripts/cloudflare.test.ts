@@ -999,3 +999,37 @@ test("deploy hands the installer this machine's files, the recorded revision and
     operation_version: "1",
   })
 })
+
+test("while a local state is unmoved only force-unlock reaches Terraform", async () => {
+  const f = layout("terraform-cloudflare-unmoved-")
+  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  saveCloudflare(f.files, result, f.credentialsFile)
+  initialized(f.files)
+  writeFileSync(
+    f.files.state,
+    JSON.stringify({
+      version: 4,
+      serial: 3,
+      lineage: "l",
+      resources: [{ type: "x" }],
+    })
+  )
+  const bin = echoTerraform(
+    f.directory,
+    "process.stdout.write(JSON.stringify({ args: process.argv.slice(2) }))"
+  )
+  const env = { PATH: `${bin}:${process.env.PATH}` }
+  const run = (...args: string[]) =>
+    driver([...args, "--root", f.root, "--instance-dir", f.files.instance], env)
+  const plan = run("plan", "--source", f.source.path)
+  expect(plan.exitCode).toBe(1)
+  expect(plan.stderr.toString()).toContain("not in the state bucket yet")
+  const unlock = run("force-unlock", "-force", "lock-id")
+  expect(unlock.exitCode).toBe(0)
+  expect(JSON.parse(unlock.stdout.toString()).args).toEqual([
+    `-chdir=${f.rootDirectory}`,
+    "force-unlock",
+    "-force",
+    "lock-id",
+  ])
+})

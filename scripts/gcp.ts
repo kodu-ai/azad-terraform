@@ -508,7 +508,8 @@ async function main() {
   }
   readBackendRecord(files, initCommand)
   assertInitialized(files, store.bucket, initCommand)
-  assertMoved(files, initCommand)
+  // force-unlock stays possible: a move that crashed may hold Terraform's lock.
+  if (command !== "force-unlock") assertMoved(files, initCommand)
   /** The full installer handoff: Terraform's output, the revision and where state lives. */
   const handoff = (lease: string) => {
     const deploy = deployOutput(terraform)
