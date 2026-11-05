@@ -213,7 +213,9 @@ Cloudflare side. Before Terraform deletes its own resources, a destroy-time
 step runs the app's `cloudflare-install.ts uninstall` (from `--source`), which
 removes what the app created: the Mini App Workers bound to this
 installation's API Worker and their D1 databases, the API Worker with its
-custom domain and queue consumer, the Pages project with its domain and CNAME,
+custom domain and queue consumer, its code executor and image encoder Workers
+(`code-<API Worker>`, `image-<API Worker>`), the Pages project with its domain
+and CNAME,
 and the Hyperdrive; it empties this installation's R2 buckets so Terraform can
 delete them. Nothing is selected by a pattern alone, so other resources in the
 account are untouched. It keeps your database, your own bucket, the Clerk
@@ -222,9 +224,12 @@ in your database, so a later apply and deploy reinstall over it. Setting
 `deployment.enabled = false` on a running instance also uninstalls it.
 
 On the `cloudsql` root, Cloud SQL's deletion protection is on by default. A
-destroy then uninstalls everything above and stops with an error at the
-database, which it keeps. To delete the database too, set
-`gcp.deletion_protection` to `false`, apply, then destroy.
+destroy then uninstalls everything above and stops with an error at the Cloud
+SQL instance, which it keeps with its database and user. To delete them too,
+set `gcp.deletion_protection` to `false`, apply, then destroy: deleting the
+instance removes the database and user, so clients that are still connected
+(Hyperdrive's pool closes its connections only after a while) cannot stop the
+destroy. An installation made before 0.2.1 records this at its next apply.
 
 ## Decisions and limits
 
