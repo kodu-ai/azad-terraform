@@ -20,6 +20,12 @@ import {
   type InstanceTerraform,
 } from "./instance"
 import { ownBackendFile } from "./own-backend"
+import {
+  initializeOwnBackend,
+  pointerState,
+  recordedState,
+  stateTerraform,
+} from "./fixtures/terraform"
 import { SettingsRefused, type AppSettings } from "./source"
 import { cloudflareStore } from "./state"
 
@@ -373,10 +379,7 @@ test("with a backend_override.tf, commands run in the installation's copy of the
     ownBackendFile(f.files),
     'terraform {\n  cloud {\n    organization = "team"\n    workspaces {\n      name = "azad"\n    }\n  }\n}\n'
   )
-  const bin = echoTerraform(
-    f.directory,
-    "process.stdout.write(JSON.stringify({ args: process.argv.slice(2), data: process.env.TF_DATA_DIR, r2Key: process.env.AWS_ACCESS_KEY_ID ?? null }))"
-  )
+  const terraform = stateTerraform(f.directory)
   const plan = () =>
     driver(
       [
@@ -388,28 +391,43 @@ test("with a backend_override.tf, commands run in the installation's copy of the
         "--instance-dir",
         f.files.instance,
       ],
-      { PATH: `${bin}:${process.env.PATH}` }
+      { PATH: terraform.path }
     )
   const refused = plan()
   expect(refused.exitCode).toBe(1)
   expect(refused.stderr.toString()).toContain("not initialized yet")
-  const data = join(f.files.directory, ".terraform-own")
-  mkdirSync(data, { recursive: true })
-  writeFileSync(
-    join(data, "terraform.tfstate"),
-    JSON.stringify({ backend: { type: "cloud" } })
+  const identity = initializeOwnBackend(f.files.directory)
+  // Before init has pointed the bucket at it, the backend is not used.
+  expect(plan().stderr.toString()).toContain("does not point at the backend")
+  terraform.answer(
+    "bucket-state",
+    pointerState({ backend: "cloud", identity, lineage: "lineage-own" })
   )
+  terraform.answer("root", recordedState("lineage-own"))
   const planned = plan()
   expect(planned.stderr.toString()).toBe("")
-  expect(JSON.parse(planned.stdout.toString())).toEqual({
-    args: [
-      `-chdir=${join(f.files.directory, "own-backend", "roots", f.root)}`,
-      "plan",
-      `-var-file=${f.files.vars}`,
-    ],
-    data,
-    r2Key: null,
-  })
+  expect(terraform.calls()).toEqual([
+    {
+      args: [
+        `-chdir=${join(f.files.directory, "own-backend", "roots", f.root)}`,
+        "plan",
+        `-var-file=${f.files.vars}`,
+      ],
+      data: join(f.files.directory, ".terraform-own"),
+      r2Key: null,
+    },
+  ])
+  // Another backend than the recorded one is refused.
+  terraform.answer(
+    "bucket-state",
+    pointerState({
+      backend: "s3",
+      identity: "s3 7 default",
+      lineage: "lineage-own",
+    })
+  )
+  expect(plan().stderr.toString()).toContain("lives in another s3 backend")
+  expect(terraform.calls()).toHaveLength(1)
 })
 
 test("a moved installation without its backend_override.tf refuses to plan against the bucket's pointer", async () => {
@@ -417,54 +435,60 @@ test("a moved installation without its backend_override.tf refuses to plan again
   const result = await prepareCloudflare(input, app, boundary().fetcher)
   saveCloudflare(f.files, result, f.credentialsFile)
   initialized(f.files)
-  const bin = join(f.directory, "bin")
-  mkdirSync(bin, { recursive: true })
-  const pointer = {
-    version: 4,
-    serial: 2,
-    lineage: "lineage-install",
-    resources: [],
-    outputs: {
-      azad_state_moved: {
-        value: JSON.stringify({
-          backend: "s3",
-          lineage: "lineage-install",
-          at: "2026-11-05T21:00:00.000Z",
-          by: "laptop",
-        }),
-        type: "string",
-      },
-    },
-  }
-  writeFileSync(
-    join(bin, "terraform"),
-    `#!/usr/bin/env -S bun --no-env-file\nif (process.argv[4] === "pull") process.stdout.write(${JSON.stringify(JSON.stringify(pointer))})\nelse process.exit(9)\n`,
-    { mode: 0o755 }
+  const terraform = stateTerraform(f.directory)
+  terraform.answer(
+    "root",
+    pointerState({
+      backend: "s3",
+      identity: "s3 7 default",
+      lineage: "lineage-own",
+    })
   )
-  const plan = driver(
-    [
-      "plan",
-      "--root",
-      f.root,
-      "--source",
-      f.source.path,
-      "--instance-dir",
-      f.files.instance,
-    ],
-    { PATH: `${bin}:${process.env.PATH}` }
-  )
+  const run = (...args: string[]) =>
+    driver(
+      [
+        ...args,
+        "--root",
+        f.root,
+        "--source",
+        f.source.path,
+        "--instance-dir",
+        f.files.instance,
+      ],
+      { PATH: terraform.path }
+    )
+  const plan = run("plan")
   expect(plan.exitCode).toBe(1)
   expect(plan.stderr.toString()).toContain(
     "keeps Terraform's state in its own s3 backend (since 2026-11-05T21:00:00.000Z, from laptop)"
   )
   expect(stateCalls(f.source)).toEqual([])
   // A state pushed back into the bucket replaces the pointer.
-  const push = driver(
+  expect(run("state", "push", "-force", "moved.tfstate").exitCode).toBe(0)
+  expect(terraform.calls().map((call) => call.args.slice(1, 3))).toEqual([
+    ["state", "push"],
+  ])
+})
+
+test("a check that passed before the operation record is taken is made again inside it", async () => {
+  const f = layout("terraform-cloudflare-race-")
+  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  saveCloudflare(f.files, result, f.credentialsFile)
+  initialized(f.files)
+  const terraform = stateTerraform(f.directory)
+  // Another machine moves the state while this apply waits for the record.
+  terraform.answer(
+    "root",
+    recordedState("lineage-bucket"),
+    pointerState({
+      backend: "s3",
+      identity: "s3 7 default",
+      lineage: "lineage-bucket",
+    })
+  )
+  const apply = driver(
     [
-      "state",
-      "push",
-      "-force",
-      "moved.tfstate",
+      "apply",
       "--root",
       f.root,
       "--source",
@@ -472,9 +496,15 @@ test("a moved installation without its backend_override.tf refuses to plan again
       "--instance-dir",
       f.files.instance,
     ],
-    { PATH: `${bin}:${process.env.PATH}` }
+    { PATH: terraform.path }
   )
-  expect(push.stderr.toString()).not.toContain("pointer")
+  expect(apply.exitCode).toBe(1)
+  expect(apply.stderr.toString()).toContain("holds only a pointer")
+  expect(terraform.calls()).toEqual([])
+  expect(stateCalls(f.source).map((call) => call.command)).toEqual([
+    "acquire",
+    "stop",
+  ])
 })
 
 test("forwards a saved-plan command with the selected token, the instance's variables, working data and the source checkout", async () => {

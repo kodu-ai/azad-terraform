@@ -31,12 +31,13 @@ import {
 } from "./instance"
 import { readEnvFile, type Fetcher } from "./lib"
 import {
-  assertOwnInitialized,
+  assertOwnCurrent,
   assertStateHere,
   bucketConfiguration,
   initOwnBackend,
   ownBackend,
   ownBackendFile,
+  recordFirstState,
 } from "./own-backend"
 import {
   assertMoved,
@@ -925,6 +926,10 @@ async function main() {
   const terraform = own
     ? runner(own, false)
     : runner({ root: files.root, data: files.data }, true)
+  const runs = own && {
+    bucket: runner(bucketConfiguration(files), true),
+    own: terraform,
+  }
   const app =
     source &&
     installStore(source, {
@@ -936,14 +941,12 @@ async function main() {
   if (command === "init") {
     mkdirSync(files.directory, { recursive: true, mode: 0o700 })
     initRecord = await configureBackend(files, store, { token })
-    if (own) {
+    if (own && runs) {
       if (!app) throw new SetupError(USAGE)
       process.exitCode = initOwnBackend({
         files,
-        runs: {
-          bucket: runner(bucketConfiguration(files), true),
-          own: terraform,
-        },
+        own,
+        runs,
         forwarded: forwardedRaw,
         store: app,
         takeOver: options["take-over"],
@@ -974,15 +977,23 @@ async function main() {
     process.exitCode = status
     return
   }
-  if (own) assertOwnInitialized(own, files, initCommand)
-  else assertInitialized(files, store.bucket, initCommand)
-  // force-unlock stays possible: a move that crashed may hold Terraform's lock.
-  if (command !== "force-unlock") {
-    assertMoved(files, initCommand)
+  /**
+   * Where the state lives. With an own backend the bucket must point at
+   * exactly that backend; without one it must not hold the pointer. Checked
+   * before a command, and again inside the operation record before one that
+   * changes anything: another machine may have moved the state meanwhile.
+   */
+  const checkState = () => {
+    if (command === "force-unlock" || command === "backup-keys") return
+    if (own && runs) assertOwnCurrent(files, own, runs, initCommand)
     // state push stays possible: it is how a state comes back to the bucket.
-    if (!own && !(command === "state" && forwardedRaw[0] === "push"))
+    else if (!(command === "state" && forwardedRaw[0] === "push"))
       assertStateHere(terraform, files, initCommand)
   }
+  if (!own) assertInitialized(files, store.bucket, initCommand)
+  // force-unlock stays possible: a move that crashed may hold Terraform's lock.
+  if (command !== "force-unlock") assertMoved(files, initCommand)
+  checkState()
   /** The full installer handoff: Terraform's outputs, the revision and the database URL. */
   const handoff = (lease: string) => {
     const outputs = terraformOutputs(terraform)
@@ -1017,6 +1028,7 @@ async function main() {
       "deploy",
       { takeOver: options["take-over"], revision: config.deployment.revision },
       (lease) => {
+        checkState()
         const input = handoff(lease)
         app.publish(lease, JSON.stringify(input), REPOSITORY)
         return Bun.spawnSync(
@@ -1055,7 +1067,9 @@ async function main() {
     phase,
     { takeOver: options["take-over"] },
     (lease) => {
+      checkState()
       const status = terraform([command, ...forwarded]).status
+      if (status === 0 && own && runs) recordFirstState(files, own, runs)
       // The deployment object tells release updates what this infrastructure
       // provides; it is written after every successful apply.
       if (
