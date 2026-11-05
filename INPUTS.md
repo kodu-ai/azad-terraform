@@ -147,6 +147,7 @@ setting later, edit the file, then `plan` and `apply`. `refresh` changes only
 | `gcp.tier`, `gcp.availability_type`, `gcp.disk_size_gb` | No, `cloudsql` | Size of the database | `db-custom-2-7680`, `ZONAL`, `20` |
 | `gcp.deletion_protection` | No, `cloudsql` | Stops Terraform from deleting the database | `true` |
 | `gcp.database_name`, `gcp.username`, `gcp.instance_name`, `gcp.labels` | No, `cloudsql` | Names and labels; the instance is `azad-<hash of the API origin>` unless named | `azad`, `azad` |
+| `updater_image` | No (the `azad` CLI sets it) | The updater image, pinned by digest. It turns on release updates from the console: the deploy copies it into the account's container registry and deploys the installation's updater Worker, which runs each update in a Cloudflare Container (Workers Paid). `null` keeps updates to `azad update` | `null`; `ghcr.io/kodu-ai/azad-updater@sha256:…` |
 
 Cloud SQL always runs PostgreSQL 17 on SSD with a growing disk, backups and
 point-in-time recovery, and accepts only encrypted connections.
@@ -168,6 +169,8 @@ point-in-time recovery, and accepts only encrypted connections.
 | `agent_machine` | No (setup, `--agent-machine`) | `machine_type`, `label` and `disk_size_gb` of a VM for agents | none |
 | `clerk_dns` | No (setup) | Clerk's production CNAMEs that DNS still lacks | `null` |
 | `clerk_application` | No (setup) | The Clerk application an evaluation install deletes on destroy | `null` |
+| `updater_image` | No (the `azad` CLI sets it) | The updater image, pinned by digest. It turns on release updates from the console: each update runs as a Kubernetes Job in the cluster ([docs/google-cloud.md](docs/google-cloud.md#release-updates-from-the-console)). `null` keeps updates to `azad update` | `null`; `ghcr.io/kodu-ai/azad-updater@sha256:…` |
+| `install_bucket` | No (the driver passes it) | The installation's state bucket. `gcp.ts` sets it on every Terraform run (`TF_VAR_install_bucket`); the updater's grants name it | |
 | `cloudflare_proxy`, `manage_ssl_rule` | No | Proxy the hostnames through Cloudflare with an Origin CA certificate | `false`, `true` |
 | `proxy_only_subnet_range` | No | The load balancer's proxy-only subnet; `null` to share the region's existing one | `10.127.0.0/23` |
 | `ready_timeout_minutes` | No | How long DNS and deploys wait for the load balancer and the new revision | `45` |
@@ -181,7 +184,8 @@ Cloudflare's dashboard calls the API's "Write" permissions "Edit".
 
 - **Azad on Cloudflare:** Account: Account Settings Read, Workers Scripts
   Edit, Workers R2 Storage Edit, Queues Edit, Hyperdrive Edit, Cloudflare
-  Pages Edit and Secrets Store Edit (the instance keys). R2 also holds
+  Pages Edit, Secrets Store Edit (the instance keys) and Containers Edit (the
+  updater's Container, for release updates from the console). R2 also holds
   Terraform's state, reached with this token's S3 credentials. Zone (the zones of your hostnames): Zone Read, DNS Edit and
   Workers Routes Edit. With `sslmode=verify-full`, also Account: SSL and
   Certificates Read for an existing CA ID, or Edit for
