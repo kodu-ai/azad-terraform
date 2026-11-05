@@ -106,15 +106,30 @@ variable "v8_heap_limit_mb" {
 }
 
 variable "sidecars" {
-  description = "Extra containers in each node's pod, for example the Cloud SQL Auth Proxy that gives the Worker a local PostgreSQL endpoint."
+  description = <<-EOT
+    Extra containers in each node's pod, for example the Cloud SQL Auth Proxy
+    that gives the Worker a local PostgreSQL endpoint. kubernetes_api_token
+    mounts the pod's service account token, the cluster CA and the namespace
+    at /var/run/secrets/kubernetes.io/serviceaccount in that sidecar only:
+    the pod then automounts no token, so celld and every other container run
+    without Kubernetes API credentials (celld reaches its bucket through the
+    cloud's workload identity, not through a token).
+  EOT
   type = list(object({
-    name           = string
-    image          = string
-    args           = optional(list(string), [])
-    cpu_request    = optional(string, "100m")
-    memory_request = optional(string, "128Mi")
+    name                 = string
+    image                = string
+    args                 = optional(list(string), [])
+    env                  = optional(map(string), {})
+    cpu_request          = optional(string, "100m")
+    memory_request       = optional(string, "128Mi")
+    run_as_user          = optional(number)
+    kubernetes_api_token = optional(bool, false)
   }))
   default = []
+  validation {
+    condition     = length(distinct([for sidecar in var.sidecars : sidecar.name])) == length(var.sidecars) && alltrue([for sidecar in var.sidecars : can(regex("^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", sidecar.name)) && !contains(["celld", "pgbouncer"], sidecar.name)])
+    error_message = "Give each sidecar its own lowercase DNS-label name other than celld and pgbouncer."
+  }
 }
 
 variable "database_pooler" {

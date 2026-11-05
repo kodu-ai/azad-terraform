@@ -32,6 +32,41 @@ run "same_installer_handoff" {
   }
 }
 
+run "updates_stay_with_the_cli_without_an_updater_image" {
+  command = plan
+  variables {
+    deployment = {
+      env_file = "tests/fixtures/settings.env"
+    }
+  }
+  assert {
+    condition     = output.deploy.updater == null
+    error_message = "Without an updater image the installer deploys no updater Worker."
+  }
+}
+
+run "the_installer_gets_the_pinned_updater_image" {
+  command = plan
+  variables {
+    deployment = {
+      env_file = "tests/fixtures/settings.env"
+    }
+    updater_image = "ghcr.io/kodu-ai/azad-updater@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  }
+  assert {
+    condition     = output.deploy.updater.image == "ghcr.io/kodu-ai/azad-updater@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    error_message = "The installer copies exactly the pinned image and deploys the updater Worker with it."
+  }
+}
+
+run "the_updater_image_is_pinned_by_digest" {
+  command = plan
+  variables {
+    updater_image = "ghcr.io/kodu-ai/azad-updater:latest"
+  }
+  expect_failures = [var.updater_image]
+}
+
 run "managed_neon_ca" {
   command = apply
   variables {

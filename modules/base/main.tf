@@ -25,6 +25,7 @@ module "cloudflare" {
 
 module "installation" {
   source          = "../installation"
+  updater_image   = var.updater_image
   cloudflare      = var.cloudflare
   deployment      = var.deployment
   source_dir      = var.source_dir

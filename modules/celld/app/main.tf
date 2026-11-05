@@ -18,6 +18,7 @@ locals {
     managed_git           = var.managed_git
     # Not secret: part of the handoff.
     ssh_allowed_private_cidrs = var.ssh_allowed_private_cidrs
+    updater                   = var.updater
   }
 }
 

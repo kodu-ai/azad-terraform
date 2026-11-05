@@ -41,6 +41,10 @@ locals {
   # A plain TCP connect: PgBouncer listens on loopback only, which kubelet's
   # tcp_socket probe (it dials the pod IP) cannot reach.
   pooler_probe = var.database_pooler == null ? null : ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${var.database_pooler.port}"]
+
+  # A sidecar that calls the Kubernetes API gets the token on its own; every
+  # other container, celld first, then has none (see var.sidecars).
+  kubernetes_api = anytrue([for sidecar in var.sidecars : sidecar.kubernetes_api_token])
 }
 
 # The pooler's settings, and its auth file with the database password.
@@ -142,6 +146,7 @@ resource "kubernetes_stateful_set_v1" "fleet" {
       }
       spec {
         service_account_name             = kubernetes_service_account_v1.node.metadata[0].name
+        automount_service_account_token  = !local.kubernetes_api
         termination_grace_period_seconds = local.termination_grace_seconds
         node_selector                    = local.node_selector
         dynamic "toleration" {
@@ -330,6 +335,13 @@ resource "kubernetes_stateful_set_v1" "fleet" {
             name  = container.value.name
             image = container.value.image
             args  = container.value.args
+            dynamic "env" {
+              for_each = container.value.env
+              content {
+                name  = env.key
+                value = env.value
+              }
+            }
             resources {
               requests = {
                 cpu                 = container.value.cpu_request
@@ -342,9 +354,54 @@ resource "kubernetes_stateful_set_v1" "fleet" {
             }
             security_context {
               run_as_non_root            = true
+              run_as_user                = container.value.run_as_user
               allow_privilege_escalation = false
               capabilities {
                 drop = ["NET_RAW"]
+              }
+            }
+            dynamic "volume_mount" {
+              for_each = container.value.kubernetes_api_token ? [1] : []
+              content {
+                name       = "kubernetes-api"
+                mount_path = "/var/run/secrets/kubernetes.io/serviceaccount"
+                read_only  = true
+              }
+            }
+          }
+        }
+        # What the kubelet would automount, for the one sidecar that asks:
+        # a bound, rotated token of the pod's service account, the cluster's
+        # CA bundle and the namespace.
+        dynamic "volume" {
+          for_each = local.kubernetes_api ? [1] : []
+          content {
+            name = "kubernetes-api"
+            projected {
+              sources {
+                service_account_token {
+                  path               = "token"
+                  expiration_seconds = 3607
+                }
+              }
+              sources {
+                config_map {
+                  name = "kube-root-ca.crt"
+                  items {
+                    key  = "ca.crt"
+                    path = "ca.crt"
+                  }
+                }
+              }
+              sources {
+                downward_api {
+                  items {
+                    path = "namespace"
+                    field_ref {
+                      field_path = "metadata.namespace"
+                    }
+                  }
+                }
               }
             }
           }

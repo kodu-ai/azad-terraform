@@ -192,6 +192,20 @@ gives values back only to a Worker bound to them, so keep the offline copy
 `backup-keys --out DIR` writes, and never delete the installer state or keys
 to retry a deployment: they decrypt the data in the database.
 
+### Release updates from the console
+
+With `updater_image` set (off by default on Cloudflare: set it to the image azad 0.2.0 published, `ghcr.io/kodu-ai/azad-updater@sha256:3959ed459010390940e6e9b6a151baeef3cccf42cd1be00553fab18918bb77ca`),
+an admin can update the installation from its settings to a release azad.pro
+runs, and `azad update` keeps working beside it. The deploy copies the pinned
+updater image into the account's container registry and deploys the
+installation's updater Worker, which runs each update in a Cloudflare
+Container. Containers need the Workers Paid plan, and the deployment token
+needs Workers Containers Edit ([INPUTS.md](../INPUTS.md#the-cloudflare-api-token)).
+The keys and deploy credentials are bound to the updater Worker only; the API
+gets a binding that can start an update and read its status. An update never
+runs Terraform: a release that needs new infrastructure asks you to run the
+CLI first.
+
 ## Uninstall
 
 `cloudflare.ts destroy` is a complete uninstall of the installation's

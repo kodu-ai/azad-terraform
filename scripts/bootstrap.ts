@@ -112,6 +112,9 @@ const deploymentAccountGroups = [
   "Pages Write",
   // The installation's keys live in the account's Secrets Store.
   "Secrets Store Write",
+  // Console release updates: the deploy pushes the updater image into the
+  // account's container registry and creates the updater's Container.
+  "Workers Containers Write",
 ]
 
 function permission(groups: Group[], name: string, scope: string) {

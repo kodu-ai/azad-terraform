@@ -39,6 +39,11 @@ bun --no-env-file <source>/scripts/self-host/celld-install.ts      # Google Clou
   outputs as `deploy`, plus the revision, the database URL (Cloudflare) and
   the state bucket. They read the instance's `.env` themselves. Terraform's
   destroy runs the Cloudflare uninstall with `AZAD_TERRAFORM_UNINSTALL`.
+- With `updater_image` set, the handoff also has `updater`: `{ "image" }`
+  on Cloudflare, which the deploy copies into the account's container
+  registry for the installation's updater Worker, and `{ "url" }` on Google
+  Cloud, where the API reaches its pod's update starter. It is null
+  otherwise.
 - A deploy is bound to the checkout's commit. `setup` and `refresh` record its
   `HEAD` as `deployment.revision`; the deploy refuses a checkout whose `HEAD`
   differs, and one older than the revision the installation runs.
@@ -156,7 +161,7 @@ keys: keep the instance directory private.
 | [`modules/base`](../modules/base), [`modules/base-postgres`](../modules/base-postgres) | The two Cloudflare compositions |
 | [`modules/installation`](../modules/installation) | The Cloudflare deploy handoff (`deploy` output) and the destroy-time uninstall through the app's `cloudflare-install.ts` |
 | [`modules/cloudflare/*`](../modules/cloudflare) | R2 buckets and queue, Clerk DNS, DNS records, the proxied edge, hostname route reservations |
-| [`modules/gcp/*`](../modules/gcp) | Cloud SQL, GKE Autopilot, the Gateway, certificates, Backup for GKE, the Cloud SQL Proxy Operator, the agent machine |
+| [`modules/gcp/*`](../modules/gcp) | Cloud SQL, GKE Autopilot, the Gateway, certificates, Backup for GKE, the Cloud SQL Proxy Operator, the agent machine, the console updater's identity and access (`modules/gcp/updater`) |
 | [`modules/kubernetes/*`](../modules/kubernetes) | cert-manager, Forgejo, raw manifests |
 | [`modules/celld/*`](../modules/celld) | The celld fleet (a StatefulSet with PgBouncer) and the deploy handoff (`deploy` output) for the app's `celld-install.ts` |
 | [`modules/clerk/application`](../modules/clerk/application) | Deletes an evaluation install's Clerk application on destroy |

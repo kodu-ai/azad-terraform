@@ -38,7 +38,7 @@ when you want to run it yourself.
 Download a release and check it:
 
 ```sh
-version=0.1.0
+version=0.2.0
 base="https://github.com/kodu-ai/azad-terraform/releases/download/v$version"
 curl -fsSLO "$base/azad-terraform-$version.tar.gz"
 curl -fsSLO "$base/azad-terraform-$version.tar.gz.sha256"
@@ -220,6 +220,16 @@ checkout never puts an older release back. Terraform never deploys the app:
 setting in `terraform.tfvars.json` or move to a newer release of this repo
 (download it, `bun install`, and run `init` from the new copy first). Then
 `deploy`, which also applies changed settings from `.env`.
+
+### From the console
+
+With `updater_image` set (the default on Google Cloud; on Cloudflare you set it), an admin can also update
+to a release azad.pro runs from the installation's settings: a Cloudflare
+Container on Cloudflare, a Kubernetes Job on Google Cloud
+([docs/cloudflare.md](docs/cloudflare.md#release-updates-from-the-console),
+[docs/google-cloud.md](docs/google-cloud.md#release-updates-from-the-console)).
+These updates never run Terraform. On Cloudflare the deployment token also
+needs **Workers Containers Edit**, and the account the Workers Paid plan.
 
 ### Moving from 0.0.x
 

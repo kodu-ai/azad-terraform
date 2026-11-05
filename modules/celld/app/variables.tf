@@ -67,3 +67,15 @@ variable "ssh_allowed_private_cidrs" {
   default     = []
 }
 
+
+variable "updater" {
+  description = "Console release updates: url is where the API reaches its pod's update starter (AZAD_UPDATER_URL), on the pod's loopback. Null keeps updates to the CLI."
+  type = object({
+    url = string
+  })
+  default = null
+  validation {
+    condition     = var.updater == null || can(regex("^http://127\\.0\\.0\\.1:[0-9]{1,5}$", var.updater.url))
+    error_message = "The starter listens on the pod's loopback: http://127.0.0.1:PORT."
+  }
+}

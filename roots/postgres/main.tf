@@ -10,4 +10,5 @@ module "base" {
   github_app_pending = var.github_app_pending
   host_zones         = var.host_zones
   clerk_dns          = var.clerk_dns
+  updater_image      = var.updater_image
 }

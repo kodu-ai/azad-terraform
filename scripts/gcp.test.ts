@@ -295,7 +295,10 @@ import { appendFileSync } from "node:fs"
 const args = process.argv.slice(2)
 if (args[1] === "state" && args[2] === "list") process.stdout.write(${JSON.stringify(addresses.map((address) => `${address}\n`).join(""))})
 else if (args[1] === "output") process.stdout.write("null")
-else appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR, firstDeployPending: process.env.TF_VAR_first_deploy_pending }) + "\\n")
+else {
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR, firstDeployPending: process.env.TF_VAR_first_deploy_pending }) + "\\n")
+  appendFileSync(${JSON.stringify(`${log}.bucket`)}, (process.env.TF_VAR_install_bucket ?? "") + "\\n")
+}
 `,
     { mode: 0o755 }
   )
@@ -320,7 +323,9 @@ else appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line))
-  return { root, source, files, gcp, calls }
+  const buckets = () =>
+    readFileSync(`${log}.bucket`, "utf8").split("\n").filter(Boolean)
+  return { root, source, files, gcp, calls, buckets, store }
 }
 
 test("before the cluster exists the first plan covers only it and Clerk's DNS; the full plan follows", () => {
@@ -423,6 +428,24 @@ test("until the first deploy, DNS does not wait for fleets that serve nothing ye
     deployed.source.path
   )
   expect(deployed.calls()[0].firstDeployPending).toBe("false")
+})
+
+test("every Terraform run gets the installation's state bucket, which the updater's grants name", () => {
+  const instance = initializedInstance([
+    "module.gke.google_container_cluster.this",
+  ])
+  expect(
+    instance.gcp(
+      "plan",
+      "-out=terraform.tfplan",
+      "--source",
+      instance.source.path
+    ).exitCode
+  ).toBe(0)
+  expect(instance.buckets()).toEqual([instance.store.bucket])
+  expect(instance.store.bucket).toBe(
+    gcpStore("azad-board-1234", "customer-project").bucket
+  )
 })
 
 test("plan, apply, destroy and refresh need the app source checkout", () => {

@@ -22,6 +22,7 @@ keys in the project's Secret Manager.
 | Agent machine (optional) | One Compute Engine VM for agents, `<name>-agents`, without a public address; only the cluster's pods reach its SSH |
 | Disk backups | Backup for GKE snapshots of the `azad` namespace's disks on the schedule chosen at setup |
 | Install state | The GCS bucket `<name>-<project hash>-install` (versioned, created by `init`): Terraform's state and the app's receipts. The instance keys are Secret Manager secrets named after it |
+| Release updates from the console (optional, `updater_image`) | An update starter in each API pod, and a Kubernetes Job per update that runs the updater image as `azad-updater` |
 
 The installation name (`<name>`) is derived from the hostname, so several
 installations can share one project. A VPC has one proxy-only subnet per
@@ -137,6 +138,29 @@ The deploy waits until the API serves the new revision, and refuses a checkout
 older than the revision the installation runs. Terraform never deploys the
 app: run `plan` and `apply` only to change infrastructure, then `deploy`. To
 redeploy the same revision, deploy again.
+
+### Release updates from the console
+
+With `updater_image` set (the default: the image azad 0.2.0 published),
+an admin can update the installation from its settings to a release azad.pro
+runs, and `azad update` keeps working beside it. Each update runs as a one-off
+Kubernetes Job in the `azad` namespace with the pinned updater image. It
+never runs Terraform: a release that needs new infrastructure asks you to run
+the CLI first.
+
+- **The Job** runs as the Kubernetes service account `azad-updater`, without
+  a Kubernetes token. Its Workload Identity reaches only the state bucket's
+  `install/` objects (never Terraform's state beside them), this
+  installation's Secret Manager secrets (listing and reading versions), Cloud
+  SQL (the proxy, and the on-demand backup an update takes first) and the
+  fleet bucket it deploys into.
+- **The starter** is a sidecar in each API pod, listening on the pod's
+  loopback, where only the API reaches it. It alone in the pod holds the
+  pod's Kubernetes token, which may create and read update Jobs and their
+  pods in the namespace, and it reads the update's progress from the
+  `install/` objects. The API itself holds no deploy access.
+
+Turning it on adds the sidecar to the API pods, so `apply` rolls them.
 
 ### Native push for the mobile apps
 

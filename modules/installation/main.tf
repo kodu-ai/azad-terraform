@@ -13,6 +13,11 @@ locals {
     github_app_pending         = var.github_app_pending
     env_file                   = abspath(var.deployment.env_file)
     state_directory            = abspath(var.deployment.state_directory)
+    # Console release updates: the installer copies the image into this
+    # account's container registry and deploys the installation's updater
+    # Worker, which runs each update in a Cloudflare Container. Terraform
+    # creates nothing for it.
+    updater = var.updater_image == null ? null : { image = var.updater_image }
   }
   # Identity only: tokens are read from the installer file at destroy time.
   uninstall_input = {
