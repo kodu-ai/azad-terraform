@@ -40,22 +40,43 @@ locals {
     length(local.exact) > 0 ? ["(http.host in {${join(" ", [for host in local.exact : jsonencode(host)])}})"] : [],
     [for suffix in local.wildcards : "ends_with(http.host, ${jsonencode(suffix)})"],
   ))
+  # The API's signed, single-use upload, download and handoff links. The URL
+  # is the whole authorization, and agents call them from plain HTTP clients
+  # that Browser Integrity Check refuses with error 1010 before the API runs.
+  capability_link_paths = [
+    "/api/apps/files/uploads/",
+    "/api/apps/files/downloads/",
+    "/api/handoff/",
+    "/api/mcp-results/download/",
+  ]
+  capability_link_expression = "http.host eq ${jsonencode(var.api_host)} and (${join(" or ", [for path in local.capability_link_paths : "starts_with(http.request.uri.path, ${jsonencode(path)})"])})"
 }
 
 # Origin CA certificates are trusted only by Cloudflare, so the hop must be
-# Full (strict): Flexible would send plaintext to an HTTPS-only origin.
+# Full (strict): Flexible would send plaintext to an HTTPS-only origin. The
+# zone has one Configuration Rules entrypoint, so the API's link exception
+# lives here too.
 resource "cloudflare_ruleset" "ssl" {
   count       = var.manage_ssl_rule ? 1 : 0
   zone_id     = var.zone_id
   name        = "Azad origin TLS"
-  description = "Full (strict) TLS to the Azad origin"
+  description = "Full (strict) TLS to the Azad origin; the API's signed links skip Browser Integrity Check"
   kind        = "zone"
   phase       = "http_config_settings"
-  rules = [{
-    action            = "set_config"
-    action_parameters = { ssl = "strict" }
-    expression        = local.host_expression
-    description       = "Azad hosts use Full (strict) TLS"
-    enabled           = true
-  }]
+  rules = [
+    {
+      action            = "set_config"
+      action_parameters = { ssl = "strict" }
+      expression        = local.host_expression
+      description       = "Azad hosts use Full (strict) TLS"
+      enabled           = true
+    },
+    {
+      action            = "set_config"
+      action_parameters = { bic = false }
+      expression        = local.capability_link_expression
+      description       = "The API's signed upload, download and handoff links skip Browser Integrity Check"
+      enabled           = true
+    },
+  ]
 }

@@ -264,6 +264,7 @@ module "edge" {
   count           = local.dns && var.cloudflare_proxy ? 1 : 0
   zone_id         = var.cloudflare_zone_id
   hosts           = [var.web_host, local.api_host, local.apps_host]
+  api_host        = local.api_host
   origin_address  = local.origin_address
   manage_ssl_rule = var.manage_ssl_rule
 }

@@ -43,7 +43,7 @@ variable "proxy_only_subnet_range" {
 }
 
 variable "manage_ssl_rule" {
-  description = "With cloudflare_proxy: create the zone's Full (strict) Configuration Rule; false when the zone already has Configuration Rules."
+  description = "With cloudflare_proxy: create the zone's Configuration Rules (Full (strict) TLS, and no Browser Integrity Check on the API's signed links); false when the zone already has Configuration Rules."
   type        = bool
   default     = true
 }
