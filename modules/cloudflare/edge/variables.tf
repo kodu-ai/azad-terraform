@@ -16,13 +16,22 @@ variable "hosts" {
   }
 }
 
+variable "api_host" {
+  description = "The API's hostname, one of hosts. Its signed upload, download and handoff links skip Browser Integrity Check."
+  type        = string
+  validation {
+    condition     = contains(var.hosts, var.api_host) && !startswith(var.api_host, "*.")
+    error_message = "Use the API's exact hostname from hosts."
+  }
+}
+
 variable "origin_address" {
   description = "Public IPv4 address of the origin load balancer."
   type        = string
 }
 
 variable "manage_ssl_rule" {
-  description = "Create the zone's Configuration Rules entrypoint with Full (strict) TLS for these hosts. A zone has one entrypoint per phase: set false when it already has Configuration Rules, and set Full (strict) there or zone-wide instead."
+  description = "Create the zone's Configuration Rules entrypoint with Full (strict) TLS for these hosts and Browser Integrity Check off for the API's signed links. A zone has one entrypoint per phase: set false when it already has Configuration Rules, and add both rules there (or set Full (strict) zone-wide) instead."
   type        = bool
   default     = true
 }
