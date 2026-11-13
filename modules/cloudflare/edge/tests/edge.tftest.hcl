@@ -15,8 +15,8 @@ run "configuration_rules_for_the_hosts" {
     error_message = "Every host uses Full (strict) TLS to the origin."
   }
   assert {
-    condition     = cloudflare_ruleset.ssl[0].rules[1].action_parameters.bic == false && cloudflare_ruleset.ssl[0].rules[1].expression == "http.host eq \"api.board.example.com\" and (starts_with(http.request.uri.path, \"/api/apps/files/uploads/\") or starts_with(http.request.uri.path, \"/api/apps/files/downloads/\") or starts_with(http.request.uri.path, \"/api/handoff/\") or starts_with(http.request.uri.path, \"/api/mcp-results/download/\"))"
-    error_message = "Only the API's signed upload, download and handoff links skip Browser Integrity Check."
+    condition     = cloudflare_ruleset.ssl[0].rules[1].action_parameters.bic == false && cloudflare_ruleset.ssl[0].rules[1].expression == "http.host eq \"api.board.example.com\" and (starts_with(http.request.uri.path, \"/api/apps/files/uploads/\") or starts_with(http.request.uri.path, \"/api/apps/files/downloads/\") or starts_with(http.request.uri.path, \"/api/handoff/\") or starts_with(http.request.uri.path, \"/api/mcp-results/download/\") or starts_with(http.request.uri.path, \"/api/artifacts/uploads/\") or starts_with(http.request.uri.path, \"/api/artifacts/previews/\"))"
+    error_message = "Only the API's signed file, handoff and artifact links skip Browser Integrity Check."
   }
 }
 

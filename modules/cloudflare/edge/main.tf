@@ -40,14 +40,17 @@ locals {
     length(local.exact) > 0 ? ["(http.host in {${join(" ", [for host in local.exact : jsonencode(host)])}})"] : [],
     [for suffix in local.wildcards : "ends_with(http.host, ${jsonencode(suffix)})"],
   ))
-  # The API's signed, single-use upload, download and handoff links. The URL
-  # is the whole authorization, and agents call them from plain HTTP clients
-  # that Browser Integrity Check refuses with error 1010 before the API runs.
+  # The API's signed upload, download, handoff, artifact upload and artifact
+  # preview links. The URL is the whole authorization, and agents call them
+  # from plain HTTP clients that Browser Integrity Check refuses with error
+  # 1010 before the API runs.
   capability_link_paths = [
     "/api/apps/files/uploads/",
     "/api/apps/files/downloads/",
     "/api/handoff/",
     "/api/mcp-results/download/",
+    "/api/artifacts/uploads/",
+    "/api/artifacts/previews/",
   ]
   capability_link_expression = "http.host eq ${jsonencode(var.api_host)} and (${join(" or ", [for path in local.capability_link_paths : "starts_with(http.request.uri.path, ${jsonencode(path)})"])})"
 }
@@ -75,7 +78,7 @@ resource "cloudflare_ruleset" "ssl" {
       action            = "set_config"
       action_parameters = { bic = false }
       expression        = local.capability_link_expression
-      description       = "The API's signed upload, download and handoff links skip Browser Integrity Check"
+      description       = "The API's signed file, handoff and artifact links skip Browser Integrity Check"
       enabled           = true
     },
   ]

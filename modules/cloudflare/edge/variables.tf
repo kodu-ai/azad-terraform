@@ -17,7 +17,7 @@ variable "hosts" {
 }
 
 variable "api_host" {
-  description = "The API's hostname, one of hosts. Its signed upload, download and handoff links skip Browser Integrity Check."
+  description = "The API's hostname, one of hosts. Its signed file, handoff and artifact links skip Browser Integrity Check."
   type        = string
   validation {
     condition     = contains(var.hosts, var.api_host) && !startswith(var.api_host, "*.")
