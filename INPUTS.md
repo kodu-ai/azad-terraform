@@ -7,7 +7,7 @@ Everything an installation needs, where it lives and who fills it in. The
 
 | Place | What goes there | Who writes it |
 | --- | --- | --- |
-| Your shell | `AZAD_SOURCE`, Google credentials, proxy settings | You |
+| Your shell | `AZAD_RELEASE`, Google credentials, proxy settings | You |
 | `<instance>/.env` (mode 0600) | Credentials and app settings. Setup reads it, the drivers take `CLOUDFLARE_API_TOKEN` and `DATABASE_URL` from it, and the deploy reads all of it | You, plus a few keys setup adds |
 | `<instance>/terraform/<root>/terraform.tfvars.json` | Non-secret Terraform variables | Setup writes it once; you edit it afterwards |
 | The installation's bucket and secret store | Terraform state (generated passwords), the app's receipts and its keys | Terraform and the deploy |
@@ -20,7 +20,7 @@ Everything an installation needs, where it lives and who fills it in. The
 
 | Name | Needed for | What it does |
 | --- | --- | --- |
-| `AZAD_SOURCE` | `setup`, `refresh`, `plan`, `apply`, `deploy`, `destroy`, `backup-keys`, `import` and the `state` commands that write, unless you pass `--source` | Path of the Azad app checkout (a clone of `kodu-ai/azad-ide-web` with `bun install` done). The drivers check that it is the checkout's top level with the `scripts/self-host` entrypoints and installed dependencies, and bind the deploy to its `HEAD`. Read-only commands (`init`, `output`, `show`, `state list`, `phase`) don't need it. |
+| `AZAD_RELEASE` | `setup`, `refresh`, `plan`, `apply`, `deploy`, `destroy`, `backup-keys`, `import`, the `state` commands that write and `init` with a `backend_override.tf`, unless you pass `--release` | Path of an unpacked Azad release: `release.json` (format 1: `version`, `sourceSha`, `signed`, `agentConnect`), `payload/` and `web/`. The `azad` CLI downloads a signed one and verifies it. The drivers check `release.json` and the four entrypoints in `payload/installer/` (`settings.js`, `cloudflare-install.js`, `celld-install.js`, `install-store.js`), run each as `bun --no-env-file payload/installer/<name>.js` from `payload/`, and bind the deploy to the release's `sourceSha`. Read-only commands (`init`, `output`, `show`, `state list`, `phase`) don't need it. |
 | `AZAD_CLI_VERSION` | No | The `azad` CLI sets it; the drivers record it with the deployment. |
 | Google Application Default Credentials | `cloudsql` and `gcp-celld` | `gcloud auth application-default login` (or `GOOGLE_APPLICATION_CREDENTIALS`). Terraform's Google provider and the Google Cloud deploy use them. |
 | `gcloud` signed in | `gcp-celld` | `gcloud auth login`. Destroy uses the gcloud CLI to wait for the cluster's disks and, for an evaluation install, to delete its backups. |
@@ -33,10 +33,13 @@ from the instance's `.env` and hand it to Terraform, overriding any exported
 value.
 
 The drivers also set these for Terraform; you never set them yourself:
-`TF_DATA_DIR` (the instance's `.terraform/`), `TF_VAR_source_dir` (from
-`--source`), `TF_VAR_database_url` (from `DATABASE_URL` in the `.env`) and
+`TF_DATA_DIR` (the instance's `.terraform/`), `TF_VAR_release_dir` and
+`AZAD_RELEASE` (from `--release`, for the destroy-time uninstall),
+`TF_VAR_database_url` (from `DATABASE_URL` in the `.env`),
+`TF_VAR_miniapp_base_domain` (from `AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN` in the
+`.env` while `AZAD_SELF_HOST_MINIAPPS=loader`, empty otherwise) and
 `TF_VAR_database_ca_pem` (ISRG Root X1 from this machine's trust store, only
-with `database_ca`).
+with `database_ca`). Values you export yourself are overridden.
 
 ## The instance `.env`
 
@@ -61,9 +64,10 @@ adds the keys marked "setup adds" below.
 | `AZAD_SELF_HOST_DATABASE_CA_CERT_ID` | With `verify-full` otherwise | ID of a CA certificate already uploaded to your Cloudflare account; not together with the previous key | |
 | `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID` | No: setup adds them | Read from GitHub with the App's key | `my-azad`, `Iv23li…` |
 | `GITHUB_WEBHOOK_SECRET` | No: setup adds one | Kept if present, generated otherwise. Copy it into the App's webhook settings | 64 hex characters |
-| `AZAD_SELF_HOST_MINIAPPS` | No: setup adds it | `enabled` with `V3_CF_API_TOKEN`, `disabled` without | `disabled` |
-| `V3_CF_API_TOKEN` | No | Turns on Mini Apps: Workers Scripts Edit and D1 Edit in the same account. Setup then adds `V3_CF_ACCOUNT_ID` | |
-| `STORAGE_ADAPTER`, `STORAGE_BUCKET`, `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY` | No | Your own bucket instead of R2: `gcs` (HMAC keys) or `s3`. `s3` also needs `STORAGE_REGION`, and `STORAGE_ENDPOINT` outside AWS. `STORAGE_RELEASES_BUCKET` puts Agent Connect releases in a second bucket | `gcs`, `my-azad-files` |
+| `AZAD_SELF_HOST_MINIAPPS` | No: setup adds it | `loader` with `--miniapps-domain <domain>`. With `--miniapps-domain none`: `disabled`, or `enabled` with `V3_CF_API_TOKEN` | `loader` |
+| `AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN` | With `loader`: setup adds it | The domain Mini Apps serve under, each on `https://<app>.<domain>`: a zone of the account (`example-apps.com`) or a subdomain inside one (`apps.example.com`, which needs Advanced Certificate Manager on that zone), apart from the API and web hosts. The one place it is set: the driver passes it to Terraform, which adds the proxied wildcard record `*.<domain>` (and, below a zone's apex, an advanced certificate pack); the deploy routes `*.<domain>/*` to the API Worker. Change it here, then plan, apply and deploy: `deploy` refuses a domain Terraform has not applied | `example-apps.com` |
+| `V3_CF_API_TOKEN` | No | With `--miniapps-domain none` only: Mini Apps as Workers with D1, through this runtime token (Workers Scripts Edit and D1 Edit in the same account). Setup then adds `V3_CF_ACCOUNT_ID` | |
+| `STORAGE_ADAPTER`, `STORAGE_BUCKET`, `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY` | No | Your own bucket instead of R2: `gcs` (HMAC keys) or `s3`. `s3` also needs `STORAGE_REGION`, and `STORAGE_ENDPOINT` outside AWS. `STORAGE_RELEASES_BUCKET` puts Agent Connect releases in a second bucket. The loader keeps Mini Apps in R2, so an own bucket needs `--miniapps-domain none` | `gcs`, `my-azad-files` |
 | `AZAD_SELF_HOST_GITHUB_APP_PENDING` | No | `1` deploys before the GitHub App exists. Put placeholders in every `GITHUB_APP_*` key, including the slug and client ID; GitHub features stay off until you replace them, set `github_app_pending` to `false` and apply | `1` |
 
 `CLOUDFLARE_ACCOUNT_ID`, `AZAD_SELF_HOST_API_ORIGIN`,
@@ -125,7 +129,7 @@ Changing them doesn't redeploy.
 
 Setup writes it once from your flags and refuses to overwrite it. To change a
 setting later, edit the file, then `plan` and `apply`. `refresh` changes only
-`deployment.revision`.
+`deployment.revision` and `deployment.version`.
 
 ### `postgres` and `cloudsql`
 
@@ -133,7 +137,7 @@ setting later, edit the file, then `plan` and `apply`. `refresh` changes only
 | --- | --- | --- | --- |
 | `cloudflare.account_id` | Yes (setup) | Your Cloudflare account: the token's only one, or `--account-id` | 32 hex characters |
 | `cloudflare.web_origin`, `cloudflare.api_origin` | Yes (setup) | `https://<web-host>` and `https://api.<web-host>`. The API origin also fixes every resource name, so change it only before the first apply | `https://board.example.com` |
-| `deployment.revision` | Yes (setup) | The app commit to deploy: the checkout's `HEAD` | 40 hex characters |
+| `deployment.revision`, `deployment.version` | Yes (setup, `refresh`) | The release to deploy: its `sourceSha` and version from `release.json`. `deploy` refuses any other release | 40 hex characters, `4.497.0` |
 | `deployment.env_file`, `deployment.state_directory` | Yes (setup) | Absolute paths of the `.env` and `installer-state/` in the instance. The drivers refuse relative paths and paths inside this repository | |
 | `deployment.enabled` | No | `false` keeps the infrastructure and uninstalls the app | `true` |
 | `host_zones` | No (setup) | Zone ID of each hostname; Terraform reserves both from zone-wide Workers routes | `{}` reserves nothing |
@@ -147,6 +151,7 @@ setting later, edit the file, then `plan` and `apply`. `refresh` changes only
 | `gcp.tier`, `gcp.availability_type`, `gcp.disk_size_gb` | No, `cloudsql` | Size of the database | `db-custom-2-7680`, `ZONAL`, `20` |
 | `gcp.deletion_protection` | No, `cloudsql` | Stops Terraform from deleting the database | `true` |
 | `gcp.database_name`, `gcp.username`, `gcp.instance_name`, `gcp.labels` | No, `cloudsql` | Names and labels; the instance is `azad-<hash of the API origin>` unless named | `azad`, `azad` |
+| `miniapp_base_domain` | No: never in this file | The Mini Apps domain. The driver sets it from the `.env` on every run (`TF_VAR_miniapp_base_domain`); edit `AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN` instead | `""` |
 | `updater_image` | No (off by default on Cloudflare) | The updater image, pinned by digest. It turns on release updates from the console: the deploy copies it into the account's container registry and deploys the installation's updater Worker, which runs each update in a Cloudflare Container (Workers Paid). `null` keeps updates to `azad update` | `null`; `ghcr.io/kodu-ai/azad-updater@sha256:…` |
 
 Cloud SQL always runs PostgreSQL 17 on SSD with a growing disk, backups and
@@ -160,7 +165,7 @@ point-in-time recovery, and accepts only encrypted connections.
 | `web_host` | Yes (setup) | The browser hostname; the API is `api.<web_host>` and Mini Apps `<app>.apps.<web_host>` | `azad.example.com` |
 | `name` | Yes (setup) | Prefix of every Google resource, derived from the hostname | `azad-azad-1a2b` |
 | `cloudflare_zone_id` | Yes (setup) | The Cloudflare zone of the hostnames | 32 hex characters |
-| `deployment` | Yes (setup) | `revision` (the source `deploy` installs; the driver reads it, Terraform does not), `env_file` and `state_directory` (`celld-install/` in the instance) | |
+| `deployment` | Yes (setup) | `revision` and `version` (the release `deploy` installs: its `sourceSha` and version; the driver reads them, Terraform does not), `env_file` and `state_directory` (`celld-install/` in the instance) | |
 | `deletion_protection` | No | Protects the cluster, database and agent machine. `false` also lets destroy delete the fleet bucket and the disk backups | `true` (`false` with `--evaluation`) |
 | `spot` | No | Spot nodes: cheaper, preemptible | `false` (`true` with `--evaluation`) |
 | `database` | No | `tier`, `disk_size_gb`, `backups`, `flags` | `db-custom-1-3840`, 10 GB, backups on |
@@ -184,12 +189,16 @@ Cloudflare's dashboard calls the API's "Write" permissions "Edit".
 
 - **Azad on Cloudflare:** Account: Account Settings Read, Workers Scripts
   Edit, Workers R2 Storage Edit, Queues Edit, Hyperdrive Edit, Cloudflare
-  Pages Edit, Secrets Store Edit (the instance keys) and Workers Containers Edit (the
-  updater's Container, for release updates from the console). R2 also holds
-  Terraform's state, reached with this token's S3 credentials. Zone (the zones of your hostnames): Zone Read, DNS Edit and
-  Workers Routes Edit. With `sslmode=verify-full`, also Account: SSL and
-  Certificates Read for an existing CA ID, or Edit for
-  `AZAD_SELF_HOST_DATABASE_CA=neon-isrg-root-x1`.
+  Pages Edit, Secrets Store Edit (the instance keys) and Workers Containers
+  Edit (the updater's Container, for release updates from the console). R2
+  also holds Terraform's state, reached with this token's S3 credentials.
+  Zone, on the zones of your hostnames and the zone that holds the Mini Apps
+  domain: Zone Read, DNS Edit and Workers Routes Edit (the wildcard record,
+  and the API Worker's route `*.<domain>/*`, which the deploy finds the zone
+  for). When the Mini Apps domain is below its zone's apex, also SSL and
+  Certificates Edit on that zone, for its advanced certificate. With
+  `sslmode=verify-full`, also Account: SSL and Certificates Read for an
+  existing CA ID, or Edit for `AZAD_SELF_HOST_DATABASE_CA=neon-isrg-root-x1`.
 - **Azad on Google Cloud:** Zone: Zone Read, DNS Edit, SSL and Certificates
   Edit and Config Settings Edit. The last two are used only with
   `cloudflare_proxy`.
@@ -203,7 +212,9 @@ token that can create tokens.
   (`roles/cloudsql.admin`, `roles/serviceusage.serviceUsageAdmin`). A user
   ADC's quota project also needs `serviceusage.services.use` (Service Usage
   Consumer).
-- **`gcp-celld`:** Owner, or Editor plus Project IAM Admin. Terraform turns on
+- **`gcp-celld`:** Owner, or Editor plus Project IAM Admin, Kubernetes Engine
+  Admin (Editor cannot create the cluster's RBAC roles) and Secret Manager
+  Secret Accessor. Terraform turns on
   the Google APIs it uses (Compute, GKE, Cloud Storage, Cloud SQL Admin,
   Certificate Manager, Secret Manager, Backup for GKE). `init` creates the
   state bucket with the Cloud Storage API, which new projects have on.
@@ -218,6 +229,7 @@ app's keys.
 | Cloud SQL password | Terraform state, in the installation's bucket. On `cloudsql`, `TF_VAR_database_password` can replace it |
 | Forgejo service password, agent machine SSH keys, Origin CA key (`gcp-celld`) | Terraform state |
 | `GITHUB_WEBHOOK_SECRET` when you supply none | Cloudflare: the `.env`. Google Cloud: with the app's secrets |
+| The Mini Apps wildcard record and, below a zone's apex, its advanced certificate (Cloudflare) | Terraform state |
 | The app's own secrets (`REALTIME_UPGRADE_SECRET`, `MEDIA_CAPABILITY_SECRET`, `INTERNAL_API_SECRET`, `AGENT_TASK_SECRET_CIPHER_KEY`, `VAPID_PRIVATE_JWK`, `MINIAPP_TOKEN_PRIVATE_JWK`, the release signing key) | The account's Secrets Store (Cloudflare) or the project's Secret Manager (Google Cloud), written once and never replaced; cached in `installer-state/` or `celld-install/`. They decrypt the data in your database: never delete them to retry a deploy |
 
 Terraform state and saved plans are sensitive. Cloud SQL's DSN and password
@@ -230,12 +242,13 @@ A few things only you can do:
 
 - Billing and quota in your accounts. For Azad on Cloudflare, Workers Paid
   with R2, Queues, Hyperdrive, Pages, Durable Objects and Worker Loaders (and
-  D1 for Mini Apps).
-- Your domain's zone in your Cloudflare account.
+  D1 for Mini Apps as Workers).
+- Your domain's zone in your Cloudflare account, and the Mini Apps domain's
+  zone. For a Mini Apps domain below its zone's apex, Advanced Certificate
+  Manager on that zone.
 - The Clerk application and GitHub App: production domain, allowed origins,
   OAuth callbacks, webhooks, the App's permissions and installation. The
-  [self-hosting guide](https://github.com/kodu-ai/azad-ide-web/blob/main/docs/self-hosting.md#clerk-application)
-  has the details. The URLs, with `api.<web-host>` as the API:
+  URLs, with `api.<web-host>` as the API:
   - Clerk webhook: `https://api.<web-host>/api/clerk/webhooks`
   - GitHub App callback URL and setup URL: `https://api.<web-host>/api/github/install/callback`
   - GitHub App webhook: `https://api.<web-host>/api/github/webhooks`

@@ -31,17 +31,9 @@ locals {
   }
 }
 
-# Terraform no longer deploys the app: `cloudflare.ts deploy` runs the app's
-# scripts/self-host/cloudflare-install.ts with this module's handoff, outside
-# any plan, so changing a setting can never put the source's revision over a
-# newer release. Releases before 0.1.0 deployed from a provisioner here; the
-# installed app stays as it is, only Terraform's record of it goes.
-removed {
-  from = terraform_data.install
-  lifecycle {
-    destroy = false
-  }
-}
+# Terraform never deploys the app: `cloudflare.ts deploy` runs the app's
+# installer with this module's handoff, outside any plan, so changing a
+# setting can never put an older release over a newer one.
 
 # Makes `terraform destroy` a complete uninstall. Destroyed before the R2
 # buckets, queue, CA and Clerk DNS it depends on, its provisioner removes what
@@ -53,22 +45,22 @@ removed {
 # Never replaced (input changes update in place), so no deploy can trigger it.
 # Disabling the deployment destroys it, which uninstalls the running instance.
 #
-# The uninstall runs scripts/self-host/cloudflare-install.ts from the source
-# checkout the drivers export as AZAD_SOURCE (their --source), and otherwise
-# from the one recorded at the last apply.
+# The uninstall runs payload/installer/cloudflare-install.js, from the
+# payload directory, of the release the drivers export as AZAD_RELEASE (their
+# --release), and otherwise of the one recorded at the last apply.
 resource "terraform_data" "uninstall" {
   count = var.deployment.enabled ? 1 : 0
 
   input = {
-    source_dir = var.source_dir
-    target     = jsonencode(local.uninstall_input)
+    release_dir = var.release_dir
+    target      = jsonencode(local.uninstall_input)
   }
 
   provisioner "local-exec" {
     when    = destroy
-    command = "bun --no-env-file \"$${AZAD_SOURCE:-$AZAD_RECORDED_SOURCE}/scripts/self-host/cloudflare-install.ts\" uninstall"
+    command = "cd \"$${AZAD_RELEASE:-$AZAD_RECORDED_RELEASE}/payload\" && bun --no-env-file installer/cloudflare-install.js uninstall"
     environment = {
-      AZAD_RECORDED_SOURCE     = try(coalesce(self.input.source_dir), "")
+      AZAD_RECORDED_RELEASE    = try(coalesce(self.input.release_dir), "")
       AZAD_TERRAFORM_UNINSTALL = self.input.target
     }
   }

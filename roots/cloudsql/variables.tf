@@ -64,7 +64,7 @@ variable "cloudflare" {
 }
 
 variable "deployment" {
-  description = "Installer handoff for `cloudflare.ts deploy`. The drivers write absolute paths in the instance directory, beside the source revision the deploy installs (deployment.revision, read by the driver only); a relative path is relative to the Terraform root directory. Set enabled=false for infrastructure only."
+  description = "Installer handoff for `cloudflare.ts deploy`. The drivers write absolute paths in the instance directory, beside the release the deploy installs (deployment.revision, its sourceSha, and deployment.version, read by the driver only); a relative path is relative to the Terraform root directory. Set enabled=false for infrastructure only."
   type = object({
     enabled         = optional(bool, true)
     env_file        = optional(string, ".env.self-host")
@@ -133,13 +133,13 @@ variable "host_zones" {
   nullable    = false
 }
 
-variable "source_dir" {
-  description = "Absolute path of the Azad app source checkout (kodu-ai/azad-ide-web) whose scripts/self-host/cloudflare-install.ts uninstalls the app on destroy. The drivers set it from --source (TF_VAR_source_dir)."
+variable "release_dir" {
+  description = "Absolute path of the unpacked Azad release whose payload/installer/cloudflare-install.js uninstalls the app on destroy. The drivers set it from --release (TF_VAR_release_dir)."
   type        = string
   default     = null
   validation {
-    condition     = startswith(coalesce(var.source_dir, "/"), "/")
-    error_message = "Use an absolute path to the Azad source checkout."
+    condition     = startswith(coalesce(var.release_dir, "/"), "/")
+    error_message = "Use an absolute path to the unpacked Azad release."
   }
 }
 
@@ -150,5 +150,24 @@ variable "updater_image" {
   validation {
     condition     = var.updater_image == null || can(regex("^ghcr\\.io/kodu-ai/azad-updater@sha256:[a-f0-9]{64}$", var.updater_image))
     error_message = "Use ghcr.io/kodu-ai/azad-updater@sha256:<digest>, or null."
+  }
+}
+
+variable "miniapp_base_domain" {
+  description = "The Mini Apps domain of the loader provider: AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN from the instance's .env while AZAD_SELF_HOST_MINIAPPS=loader, which the driver passes as TF_VAR_miniapp_base_domain on every run; empty otherwise. A zone of the account, or a subdomain inside one, apart from the API and web hosts. Terraform adds a proxied wildcard record *.<domain> and, below the zone's apex, an advanced certificate pack. Edit the .env, not this variable."
+  type        = string
+  default     = ""
+  nullable    = false
+  validation {
+    condition     = var.miniapp_base_domain == "" || can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$", var.miniapp_base_domain))
+    error_message = "AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN must be a lowercase domain name such as apps.example.com."
+  }
+  validation {
+    condition = var.miniapp_base_domain == "" || alltrue([for origin in [var.cloudflare.api_origin, var.cloudflare.web_origin] : (
+      trimprefix(origin, "https://") != var.miniapp_base_domain &&
+      !endswith(trimprefix(origin, "https://"), ".${var.miniapp_base_domain}") &&
+      !endswith(var.miniapp_base_domain, ".${trimprefix(origin, "https://")}")
+    )])
+    error_message = "AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN must be apart from the API and web hosts: not one of them, above one or below one."
   }
 }

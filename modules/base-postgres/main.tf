@@ -30,11 +30,20 @@ module "installation" {
   updater_image              = var.updater_image
   cloudflare                 = var.cloudflare
   deployment                 = var.deployment
-  source_dir                 = var.source_dir
+  release_dir                = var.release_dir
   resource_prefix            = module.cloudflare.resource_prefix
   resources                  = module.cloudflare.resources
   database_ca_certificate_id = module.cloudflare.database_ca_certificate_id
   storage                    = var.storage
   github_app_pending         = var.github_app_pending
-  depends_on                 = [module.cloudflare, module.clerk_dns, module.host_routes]
+  depends_on                 = [module.cloudflare, module.clerk_dns, module.host_routes, module.miniapp_domain]
+}
+
+module "miniapp_domain" {
+  source = "../cloudflare/miniapp-domain"
+  count  = var.miniapp_base_domain == "" ? 0 : 1
+
+  domain       = var.miniapp_base_domain
+  account_id   = var.cloudflare.account_id
+  installation = module.cloudflare.resource_prefix
 }

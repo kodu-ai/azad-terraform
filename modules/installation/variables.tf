@@ -61,8 +61,8 @@ variable "github_app_pending" {
   default     = false
 }
 
-variable "source_dir" {
-  description = "Absolute path of the Azad app source checkout (kodu-ai/azad-ide-web) whose scripts/self-host/cloudflare-install.ts uninstalls the app on destroy. The drivers set it from --source."
+variable "release_dir" {
+  description = "Absolute path of the unpacked Azad release whose payload/installer/cloudflare-install.js uninstalls the app on destroy. The drivers set it from --release."
   type        = string
   default     = null
 }

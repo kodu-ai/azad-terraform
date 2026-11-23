@@ -2,33 +2,52 @@
 
 This repository is infrastructure only. It holds Terraform roots and modules,
 and three Bun scripts (the drivers) that run Terraform against one
-installation's files. The Azad app itself lives in another repository, and
-the drivers reach it only by running a few of its scripts.
+installation's files. The Azad app comes as a release, and the drivers reach
+it only by running the installer entrypoints it bundles.
 
-## Three repositories
+## Three parts
 
-| Repository | What it does |
+| Part | What it does |
 | --- | --- |
-| [`kodu-ai/azad-cli`](https://github.com/kodu-ai/azad-cli) | The `azad` installer. It asks for what can't be derived (hostnames, Clerk, the GitHub App, cloud credentials), downloads a pinned release of this repository, checks its SHA-256 and runs the drivers. |
+| [`kodu-ai/azad-cli`](https://github.com/kodu-ai/azad-cli) | The `azad` installer. It asks for what can't be derived (hostnames, Clerk, the GitHub App, cloud credentials), downloads a pinned release of this repository and checks its SHA-256, downloads a signed Azad release and verifies it, and runs the drivers. |
 | `kodu-ai/azad-terraform` (this one) | Terraform roots and modules, and the drivers `scripts/cloudflare.ts`, `scripts/gcp.ts` and `scripts/bootstrap.ts`. No app code. |
-| [`kodu-ai/azad-ide-web`](https://github.com/kodu-ai/azad-ide-web) | The Azad app. Validating settings, migrations, building and deploying, uninstalling and verifying all run from its `scripts/self-host/*` entrypoints. |
+| An Azad release | The app, unpacked into one directory. Validating settings, migrations, deploying, uninstalling and verifying all run from its installer entrypoints. |
 
-## The app contract
+## The release contract
 
-The drivers run the app checkout you name with `--source` (or
-`AZAD_SOURCE`) as subprocesses, and never import its code:
+An unpacked release is a directory with:
 
 ```text
-bun --no-env-file <source>/scripts/self-host/settings.ts           # setup: validates and derives settings
-bun --no-env-file <source>/scripts/self-host/install-store.ts      # the installation's state in its cloud
-bun --no-env-file <source>/scripts/self-host/cloudflare-install.ts # Cloudflare: deploy, and uninstall on destroy
-bun --no-env-file <source>/scripts/self-host/celld-install.ts      # Google Cloud: deploy
+<release>/
+  release.json      {"format": 1, "version": "4.497.0", "sourceSha": "<40 hex>",
+                     "signed": true, "agentConnect": {"version": "0.46.0"}}
+                     (agentConnect may be null)
+  payload/          the updater payload, with the installer entrypoints:
+    installer/settings.js, install-store.js, cloudflare-install.js, celld-install.js
+  web/              the portable web build
+  manifest.json, agent-connect-manifest.json   signed releases only
 ```
 
-- `settings.ts` takes settings as JSON on stdin, never as arguments. It exits
+The drivers check `release.json` and the four entrypoints (`--release`, or
+`AZAD_RELEASE`), and run them as subprocesses from `payload/`, never
+importing their code:
+
+```text
+cd <release>/payload
+bun --no-env-file installer/settings.js            # setup: validates and derives settings
+bun --no-env-file installer/install-store.js       # the installation's state in its cloud
+bun --no-env-file installer/cloudflare-install.js  # Cloudflare: deploy, and uninstall on destroy
+bun --no-env-file installer/celld-install.js       # Google Cloud: deploy
+```
+
+The drivers don't read the signature files: the `azad` CLI verifies a signed
+release before it runs them. The install entrypoints find the rest of their
+release (the bundles, `web/`) from their own location.
+
+- `settings.js` takes settings as JSON on stdin, never as arguments. It exits
   0 with JSON on stdout, 65 when it refuses a setting (the reason, naming the
   setting but never its value, on stderr) and 64 for a usage error.
-- `install-store.ts` takes and releases the installation's operation record
+- `install-store.js` takes and releases the installation's operation record
   around every command that changes it, publishes the deployment handoff
   after an apply and writes the offline key backup. Its input, in
   `AZAD_INSTALL_STATE`, names the bucket and the instance's files; no
@@ -44,9 +63,14 @@ bun --no-env-file <source>/scripts/self-host/celld-install.ts      # Google Clou
   registry for the installation's updater Worker, and `{ "url" }` on Google
   Cloud, where the API reaches its pod's update starter. It is null
   otherwise.
-- A deploy is bound to the checkout's commit. `setup` and `refresh` record its
-  `HEAD` as `deployment.revision`; the deploy refuses a checkout whose `HEAD`
-  differs, and one older than the revision the installation runs.
+- A deploy is bound to the release. `setup` and `refresh` record its
+  `sourceSha` as `deployment.revision` and its version as
+  `deployment.version`; `deploy` refuses another release, and the release's
+  installer refuses one older than the release the installation runs.
+- On Cloudflare the `.env` also carries the Mini Apps domain
+  (`AZAD_SELF_HOST_MINIAPPS=loader`, `AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN`),
+  which the installer reads and Terraform gets as
+  `TF_VAR_miniapp_base_domain` ([cloudflare.md](cloudflare.md#mini-apps)).
 
 Changing this contract needs a matching change in the app and a new minor (or
 major) version here.
@@ -65,9 +89,10 @@ major) version here.
 - `--root` takes a root name, never a path, so one root's state can't be
   planned with another root's configuration.
 - `setup`, `refresh`, `plan`, `apply`, `deploy`, `destroy`, `backup-keys`,
-  `import` and the `state` commands that write need the app checkout
-  (`--source` or `AZAD_SOURCE`); the drivers check it before reading anything
-  from the network. Commands that only read state don't.
+  `import`, the `state` commands that write and an `init` with a
+  `backend_override.tf` need the release (`--release` or `AZAD_RELEASE`); the
+  drivers check it before reading anything from the network. Commands that
+  only read state don't.
 - `init` comes first, and again after the instance directory or this
   repository moves, or `CLOUDFLARE_API_TOKEN` changes. The other commands
   refuse to run until it has.
@@ -144,12 +169,6 @@ Each root declares `backend "s3" {}` (Cloudflare) or `backend "gcs" {}`
 (`-reconfigure`) and sets `TF_DATA_DIR`. Plain `terraform` commands in a root
 see none of this: use the drivers.
 
-Releases before 0.1.0 used a local backend in this directory. `init` moves
-such a state into the bucket: it pushes the file, reads it back and compares
-its resources and outputs, and only then renames it to
-`terraform.tfstate.before-remote-<time>`. A bucket that already holds a
-different state is never written.
-
 ### An own backend
 
 A `backend_override.tf` in the root's directory replaces the root's backend
@@ -203,9 +222,9 @@ only, so no other empty backend passes for it.
 `bucket-state/` reads and writes the bucket's state without the root's
 providers.
 
-- When the own backend holds no state, `init` pushes the bucket's (or a
-  local state of a release before 0.1.0) and checks the bucket did not change
-  with it, so the backend is not the bucket itself. It reads the state back,
+- When the own backend holds no state, `init` pushes the bucket's and
+  checks the bucket did not change with it, so the backend is not the bucket
+  itself. It reads the state back,
   compares resources and outputs, and keeps a copy as
   `terraform.tfstate.before-own-backend-<time>`. Only then does it write the
   pointer.
@@ -237,11 +256,11 @@ keys: keep the instance directory private.
 | [`roots/gcp-celld`](../roots/gcp-celld) | Azad on Google Cloud: GKE Autopilot, Cloud SQL, Forgejo and a regional load balancer |
 | [`roots/bootstrap`](../roots/bootstrap) | The scoped Cloudflare API tokens `scripts/bootstrap.ts` creates |
 | [`modules/base`](../modules/base), [`modules/base-postgres`](../modules/base-postgres) | The two Cloudflare compositions |
-| [`modules/installation`](../modules/installation) | The Cloudflare deploy handoff (`deploy` output) and the destroy-time uninstall through the app's `cloudflare-install.ts` |
-| [`modules/cloudflare/*`](../modules/cloudflare) | R2 buckets and queue, Clerk DNS, DNS records, the proxied edge, hostname route reservations |
+| [`modules/installation`](../modules/installation) | The Cloudflare deploy handoff (`deploy` output) and the destroy-time uninstall through the release's `cloudflare-install.js` (`release_dir`) |
+| [`modules/cloudflare/*`](../modules/cloudflare) | R2 buckets and queue, Clerk DNS, DNS records, the proxied edge, hostname route reservations, the Mini Apps domain's wildcard record and certificate (`miniapp-domain`, with `zone-lookup`) |
 | [`modules/gcp/*`](../modules/gcp) | Cloud SQL, GKE Autopilot, the Gateway, certificates, Backup for GKE, the Cloud SQL Proxy Operator, the agent machine, the console updater's identity and access (`modules/gcp/updater`) |
 | [`modules/kubernetes/*`](../modules/kubernetes) | cert-manager, Forgejo, raw manifests |
-| [`modules/celld/*`](../modules/celld) | The celld fleet (a StatefulSet with PgBouncer) and the deploy handoff (`deploy` output) for the app's `celld-install.ts` |
+| [`modules/celld/*`](../modules/celld) | The celld fleet (a StatefulSet with PgBouncer) and the deploy handoff (`deploy` output) for the release's `celld-install.js` |
 | [`modules/clerk/application`](../modules/clerk/application) | Deletes an evaluation install's Clerk application on destroy |
 
 Only official providers are used: `hashicorp/google`, `hashicorp/random`,

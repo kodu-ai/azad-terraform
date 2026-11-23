@@ -10,8 +10,8 @@ Queues, Hyperdrive) in your Cloudflare account:
   IPv4 with explicitly authorized networks.
 
 `scripts/cloudflare.ts` drives both. `apply` provisions the fixed
-infrastructure; `deploy` then runs the Azad source checkout's
-`scripts/self-host/cloudflare-install.ts` with Terraform's handoff (see
+infrastructure; `deploy` then runs the unpacked Azad release's
+`payload/installer/cloudflare-install.js` with Terraform's handoff (see
 [how-it-works.md](how-it-works.md)). Terraform's state and the app's install
 state live in the installation's R2 bucket, the keys in the account's Secrets
 Store.
@@ -34,7 +34,8 @@ Cloudflare service or external-provider request.
 
 ## Choose the database provider
 
-Choose the **database provider and region** and the **web hostname**. Cloud SQL
+Choose the **database provider and region**, the **web hostname** and the
+**Mini Apps domain** ([Mini Apps](#mini-apps)). Cloud SQL
 also needs an existing Google Cloud project and Application Default
 Credentials; an existing database needs its direct TLS connection string.
 Both use the seven fields in [credentials.env.example](../credentials.env.example):
@@ -46,14 +47,14 @@ fields. [INPUTS.md](../INPUTS.md) classifies every value.
 Put a direct, schema-owner `DATABASE_URL` in the private credential file:
 
 ```sh
-export AZAD_SOURCE=~/src/azad          # your kodu-ai/azad-ide-web checkout
+export AZAD_RELEASE=~/azad-release     # an unpacked Azad release
 instance=~/.azad/instances/default
 mkdir -m 700 -p "$instance"
 cp credentials.env.example "$instance/.env" && chmod 600 "$instance/.env"
 # Fill the Clerk/GitHub/Cloudflare fields and DATABASE_URL privately.
 bun --no-env-file scripts/cloudflare.ts setup --database-provider postgres \
-  --web-host board.example.com --credentials "$instance/.env" \
-  --root postgres --instance-dir "$instance"
+  --web-host board.example.com --miniapps-domain example-apps.com \
+  --credentials "$instance/.env" --root postgres --instance-dir "$instance"
 bun --no-env-file scripts/cloudflare.ts init  --root postgres --instance-dir "$instance"
 bun --no-env-file scripts/cloudflare.ts plan  --root postgres --instance-dir "$instance" -out=terraform.tfplan
 bun --no-env-file scripts/cloudflare.ts apply --root postgres --instance-dir "$instance" terraform.tfplan
@@ -86,6 +87,7 @@ creation.
 ```sh
 bun --no-env-file scripts/cloudflare.ts setup --database-provider cloudsql \
   --project-id my-project --web-host board.example.com \
+  --miniapps-domain example-apps.com \
   --credentials "$instance/.env" --root cloudsql --instance-dir "$instance"
 bun --no-env-file scripts/cloudflare.ts init  --root cloudsql --instance-dir "$instance"
 bun --no-env-file scripts/cloudflare.ts plan  --root cloudsql --instance-dir "$instance" -out=terraform.tfplan
@@ -104,18 +106,62 @@ networks in the generated variables before applying.
 ## What setup does
 
 Setup only reads: Cloudflare accounts and zones, the GitHub App's slug and
-client ID (with an App JWT), Clerk's DNS targets and, for Cloud SQL, public
-network information. It asks the app (`settings.ts`) to derive the storage
-selection and resource names and to validate the complete settings. It creates
-no cloud resources and does not run Terraform.
+client ID (with an App JWT), Clerk's DNS targets, the Mini Apps domain's zone
+and, for Cloud SQL, public network information. It asks the release's
+`settings.js` to derive the storage selection and resource names and to
+validate the complete settings. It creates no cloud resources and does not
+run Terraform.
 
 It writes `<instance>/terraform/<root>/terraform.tfvars.json` once and adds what
 it derives (GitHub App identity, a generated webhook secret, the Mini Apps
-switch) to the instance's private `.env`, which the deploy reads; a
+provider and domain) to the instance's private `.env`, which the deploy reads; a
 `--credentials` file elsewhere is copied there with them. It refuses to
 overwrite existing configuration; edit the saved files for later changes.
 Copy a generated `GITHUB_WEBHOOK_SECRET` into the GitHub App's webhook
 settings. The API hostname defaults to `api.<web-host>`.
+
+### Mini Apps
+
+Mini Apps run on the loader provider: inside the API Worker, each as a Dynamic
+Worker with a SQLite Durable Object as its database, served on
+`https://<app>.<domain>`. `--miniapps-domain <domain>` chooses the domain; it
+must be apart from the Board's hosts (not one of them, above one or below
+one), and can be either:
+
+- **a zone of its own** in the same account, such as `example-apps.com`.
+  Universal SSL covers `*.example-apps.com`.
+- **a subdomain inside a zone** of the account, such as `apps.example.com`
+  (the Board's own zone is fine). Universal SSL covers only a zone's
+  first-level subdomains, so Terraform orders an advanced certificate pack
+  for `example.com`, `apps.example.com` and `*.apps.example.com` (Cloudflare
+  requires the zone apex in every pack). That needs **Advanced Certificate
+  Manager** on the zone; setup refuses the domain without it, and the
+  deployment token needs SSL and Certificates Edit on that zone.
+
+Setup checks the zone, the certificate quota, that no `*.<domain>` record
+exists yet and that storage is R2 (the loader keeps app releases and database
+snapshots in this installation's R2 files bucket), then writes
+`AZAD_SELF_HOST_MINIAPPS=loader` and `AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN` into
+the `.env`. That is the one place the domain is set:
+
+- `plan`, `apply` and `destroy` pass it to Terraform as
+  `TF_VAR_miniapp_base_domain` (empty unless the loader is selected).
+  `modules/cloudflare/miniapp-domain` finds the zone that holds the domain
+  (the longest zone name it ends with) and adds a proxied wildcard record
+  `*.<domain>` (`AAAA 100::`, commented with the installation's resource
+  prefix) and, below the zone's apex, the certificate pack.
+- `deploy` hands the `.env` to the release's installer, which routes
+  `*.<domain>/*` to the API Worker. It refuses a domain other than the one
+  Terraform last applied, so the DNS record and certificate exist first.
+
+To change the domain later, edit `AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN`, then
+`plan`, `apply` and `deploy`. Installed apps keep the provider they were
+created with.
+
+`--miniapps-domain none` writes `AZAD_SELF_HOST_MINIAPPS=disabled`, and Mini
+Apps are off. With a `V3_CF_API_TOKEN` in the `.env` (Workers Scripts Edit and
+D1 Edit in the same account) it writes `enabled` instead: Mini Apps then run
+as Workers of their own with D1 databases.
 
 ### Your own object storage
 
@@ -127,7 +173,8 @@ also `STORAGE_REGION` and, for non-AWS services, `STORAGE_ENDPOINT`) to the
 credential file before setup. Setup writes the non-secret part as the
 `storage` variable; the keys stay in the private file and reach the Worker as
 secrets. No R2 bucket is created or bound. Releases share the bucket unless
-`STORAGE_RELEASES_BUCKET` names another.
+`STORAGE_RELEASES_BUCKET` names another. Mini Apps on the loader need R2, so
+pass `--miniapps-domain none`.
 
 ### Before the GitHub App exists
 
@@ -158,9 +205,9 @@ nothing and leaves existing routes alone. Destroy removes it.
 
 | Owner | Resources / operations |
 | --- | --- |
-| Terraform | Cloud SQL and its generated password when selected; two R2 buckets (unless `storage` names your own), the offline queue, Clerk DNS records, hostname route reservations, the Neon CA registration when selected |
-| The app's `cloudflare-install.ts` | Hyperdrive (caching disabled), the API Worker with its Durable Objects, Worker Loader and queue bindings, migrations, Pages, secrets, custom domains, the Agent Connect release mirror and verification |
-| The running app | Mini App Workers and D1 databases when Mini Apps are enabled |
+| Terraform | Cloud SQL and its generated password when selected; two R2 buckets (unless `storage` names your own), the offline queue, Clerk DNS records, hostname route reservations, the Neon CA registration when selected; the Mini Apps wildcard record and, below a zone's apex, its certificate pack |
+| The release's `cloudflare-install.js` | Hyperdrive (caching disabled), the API Worker with its Durable Objects, Worker Loader and queue bindings and the Mini Apps route `*.<domain>/*`, migrations, Pages, secrets, custom domains, the Agent Connect release mirror and verification |
+| The running app | Mini Apps: inside the API Worker on the loader provider, or Workers and D1 databases with `enabled` |
 
 Fixed Cloudflare names match the app installer's naming contract, so it reuses
 these resources; the deploy refuses names that differ. Worker and Pages
@@ -168,17 +215,18 @@ configuration stays with the app to avoid competing writers.
 
 ## Updates and recovery
 
-After pulling a new app revision into the source checkout:
+With a new release unpacked:
 
 ```sh
+export AZAD_RELEASE=~/azad-release-4.498.0
 bun --no-env-file scripts/cloudflare.ts refresh --root postgres --instance-dir "$instance"
 bun --no-env-file scripts/cloudflare.ts deploy  --root postgres --instance-dir "$instance"
 ```
 
-`refresh` changes only `deployment.revision` (the source's `HEAD`). The deploy
-checks the checkout's `HEAD` against it (use a clean checkout) and refuses a
-checkout that does not contain the revision the installation runs, or one a
-deploy already started migrating to. Terraform never deploys the app, so
+`refresh` changes only `deployment.revision` and `deployment.version` (the
+release's `sourceSha` and version). The deploy refuses any other release, and
+the release's installer refuses one older than the release the installation
+runs, or than one a deploy already started migrating to. Terraform never deploys the app, so
 changing a setting or a variable can never put an older release back: `plan`
 and `apply` change infrastructure only, and a `deploy` afterwards applies new
 `.env` settings to the running release. Deploying again is also how you retry
@@ -210,18 +258,21 @@ CLI first.
 
 `cloudflare.ts destroy` is a complete uninstall of the installation's
 Cloudflare side. Before Terraform deletes its own resources, a destroy-time
-step runs the app's `cloudflare-install.ts uninstall` (from `--source`), which
-removes what the app created: the Mini App Workers bound to this
-installation's API Worker and their D1 databases, the API Worker with its
-custom domain and queue consumer, its code executor and image encoder Workers
+step runs the release's `payload/installer/cloudflare-install.js uninstall`
+from its `payload/` (the release `--release` names, otherwise the one recorded
+at the last apply), which removes what the app created: Mini App Workers bound
+to this installation's API Worker and their D1 databases, the API Worker with
+its custom domain, Mini Apps route and queue consumer, its code executor and image encoder Workers
 (`code-<API Worker>`, `image-<API Worker>`), the Pages project with its domain
 and CNAME,
 and the Hyperdrive; it empties this installation's R2 buckets so Terraform can
 delete them. Nothing is selected by a pattern alone, so other resources in the
 account are untouched. It keeps your database, your own bucket, the Clerk
 application, the keys and the state bucket: those keys still decrypt the data
-in your database, so a later apply and deploy reinstall over it. Setting
-`deployment.enabled = false` on a running instance also uninstalls it.
+in your database, so a later apply and deploy reinstall over it. Terraform
+then deletes the Mini Apps wildcard record and certificate pack with its other
+resources. Setting `deployment.enabled = false` on a running instance also
+uninstalls it.
 
 On the `cloudsql` root, Cloud SQL's deletion protection is on by default. A
 destroy then uninstalls everything above and stops with an error at the Cloud
@@ -229,14 +280,15 @@ SQL instance, which it keeps with its database and user. To delete them too,
 set `gcp.deletion_protection` to `false`, apply, then destroy: deleting the
 instance removes the database and user, so clients that are still connected
 (Hyperdrive's pool closes its connections only after a while) cannot stop the
-destroy. An installation made before 0.2.1 records this at its next apply.
+destroy.
 
 ## Decisions and limits
 
 | Topic | Resolution |
 | --- | --- |
 | App deployment is not a provider resource graph | `deploy` runs the app's own installer with the handoff Terraform outputs, outside any plan. Migrations, builds, secrets and the release mirror stay there. Only the destroy-time uninstall is a provisioner. |
-| Cloudflare provider coverage | The provider could manage Workers, Pages, D1 and Hyperdrive, but reproducing the Worker configuration and Durable Object migration history would create a second owner. Only fixed R2, queue, DNS and route resources are managed here. |
+| Cloudflare provider coverage | The provider could manage Workers, Pages, D1 and Hyperdrive, but reproducing the Worker configuration and Durable Object migration history would create a second owner. Only fixed R2, queue, DNS, route and certificate resources are managed here. |
+| The Mini Apps domain | Set once, in the `.env`, which the app reads. The driver passes it to Terraform on every run instead of copying it into the variables, so the two cannot drift; `deploy` checks Terraform applied it. |
 | Hyperdrive to Cloud SQL networking | Public IPv4 with explicit authorized networks for both callers. Setup snapshots Cloudflare's published ranges into the variables; Terraform does not refresh them silently. |
 | TLS to Cloud SQL | Encrypted connections are enforced; the DSN uses `sslmode=require`, which encrypts without verifying the server certificate. Existing databases can use `verify-full` with a registered CA. |
 | Secrets | Cloud SQL's generated password and DSN are sensitive but **stored in Terraform state and saved plans**. An existing database's DSN is in saved plans only. Provider tokens come from the private `.env`; app secrets stay there and in the installer state. |

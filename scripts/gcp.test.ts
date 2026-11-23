@@ -8,7 +8,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { fakeSource } from "./fixtures/source"
+import { fakeRelease } from "./fixtures/source"
 import { gcpName, prepareGcp } from "./gcp"
 import { instanceTerraform, REPOSITORY } from "./instance"
 import { ownBackendFile } from "./own-backend"
@@ -103,6 +103,7 @@ const input = {
   webHost: "board.example.com",
   accountId: account,
   revision: "b".repeat(40),
+  version: "4.496.0",
   evaluation: false,
 }
 
@@ -125,7 +126,11 @@ test("setup derives the zone and only the Clerk records DNS still lacks, with no
     name: gcpName("board.example.com"),
     web_host: "board.example.com",
     cloudflare_zone_id: zone,
-    deployment: { revision: "b".repeat(40), env_file: path },
+    deployment: {
+      revision: "b".repeat(40),
+      version: "4.496.0",
+      env_file: path,
+    },
     disk_backups: { schedule: "daily" },
     clerk_dns: {
       zone_id: zone,
@@ -260,13 +265,17 @@ test("the agent machine chosen at setup reaches Terraform with the label project
 
 /**
  * An initialized Google Cloud instance and a `terraform` on PATH that lists
- * `addresses` as its state and logs every other call.
+ * `addresses` as its state, answers `deploy` as the root's handoff and logs
+ * every other call.
  */
-function initializedInstance(addresses: string[]) {
+function initializedInstance(
+  addresses: string[],
+  deploy: object | null = null
+) {
   const directory = mkdtempSync(join(tmpdir(), "azad-gcp-cli-"))
   directories.push(directory)
   const root = join(REPOSITORY, "roots/gcp-celld")
-  const source = fakeSource(directory)
+  const release = fakeRelease(directory)
   const files = instanceTerraform(join(directory, "instance"), "gcp-celld")
   const store = gcpStore("azad-board-1234", "customer-project")
   mkdirSync(files.data, { recursive: true })
@@ -286,7 +295,8 @@ function initializedInstance(addresses: string[]) {
       name: "azad-board-1234",
       web_host: "board.example.com",
       deployment: {
-        revision: "b".repeat(40),
+        revision: release.revision,
+        version: release.version,
         env_file: files.settings,
         state_directory: join(files.directory, "celld-install"),
       },
@@ -302,7 +312,7 @@ import { appendFileSync } from "node:fs"
 const args = process.argv.slice(2)
 if (args[1] === "state" && args[2] === "pull") {}
 else if (args[1] === "state" && args[2] === "list") process.stdout.write(${JSON.stringify(addresses.map((address) => `${address}\n`).join(""))})
-else if (args[1] === "output") process.stdout.write("null")
+else if (args[1] === "output") process.stdout.write(${JSON.stringify(JSON.stringify(deploy))})
 else {
   appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, data: process.env.TF_DATA_DIR, firstDeployPending: process.env.TF_VAR_first_deploy_pending }) + "\\n")
   appendFileSync(${JSON.stringify(`${log}.bucket`)}, (process.env.TF_VAR_install_bucket ?? "") + "\\n")
@@ -333,19 +343,19 @@ else {
       .map((line) => JSON.parse(line))
   const buckets = () =>
     readFileSync(`${log}.bucket`, "utf8").split("\n").filter(Boolean)
-  return { root, source, files, gcp, calls, buckets, store }
+  return { root, release, files, gcp, calls, buckets, store }
 }
 
 test("before the cluster exists the first plan covers only it and Clerk's DNS; the full plan follows", () => {
   const first = initializedInstance([])
-  // Reading the state needs no source checkout.
+  // Reading the state needs no release.
   expect(first.gcp("phase").stdout.toString()).toBe("cluster\n")
   const plan = first.gcp(
     "plan",
     "-input=false",
     "-out=terraform.tfplan",
-    "--source",
-    first.source.path
+    "--release",
+    first.release.path
   )
   expect(plan.exitCode).toBe(0)
   expect(plan.stdout.toString()).toContain("1 of 2")
@@ -369,8 +379,8 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
     "apply",
     "-input=false",
     "terraform.tfplan",
-    "--source",
-    first.source.path
+    "--release",
+    first.release.path
   )
   expect(first.calls().at(-1)?.args).toEqual([
     `-chdir=${first.root}`,
@@ -381,7 +391,7 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
   // The plan asked whether a deploy happened; the apply held the
   // installation's operation record, and released it.
   const calls = readFileSync(
-    join(first.source.path, "state-calls.jsonl"),
+    join(first.release.path, "state-calls.jsonl"),
     "utf8"
   )
     .split("\n")
@@ -402,7 +412,7 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
     "module.gke.google_container_cluster.this",
   ])
   expect(second.gcp("phase").stdout.toString()).toBe("full\n")
-  second.gcp("plan", "-out=terraform.tfplan", "--source", second.source.path)
+  second.gcp("plan", "-out=terraform.tfplan", "--release", second.release.path)
   expect(second.calls()[0].args).toEqual([
     `-chdir=${second.root}`,
     "plan",
@@ -414,14 +424,14 @@ test("before the cluster exists the first plan covers only it and Clerk's DNS; t
 test("until the first deploy, DNS does not wait for fleets that serve nothing yet", () => {
   const cluster = "module.gke.google_container_cluster.this"
   const fresh = initializedInstance([cluster])
-  writeFileSync(join(fresh.source.path, "not-deployed"), "")
-  fresh.gcp("plan", "-out=terraform.tfplan", "--source", fresh.source.path)
+  writeFileSync(join(fresh.release.path, "not-deployed"), "")
+  fresh.gcp("plan", "-out=terraform.tfplan", "--release", fresh.release.path)
   expect(fresh.calls()[0].firstDeployPending).toBe("true")
 
   // A direct apply before the cluster exists also runs the full apply.
   const direct = initializedInstance([])
-  writeFileSync(join(direct.source.path, "not-deployed"), "")
-  direct.gcp("apply", "-input=false", "--source", direct.source.path)
+  writeFileSync(join(direct.release.path, "not-deployed"), "")
+  direct.gcp("apply", "-input=false", "--release", direct.release.path)
   expect(direct.calls().map((call) => call.firstDeployPending)).toEqual([
     "true",
     "true",
@@ -432,8 +442,8 @@ test("until the first deploy, DNS does not wait for fleets that serve nothing ye
   deployed.gcp(
     "plan",
     "-out=terraform.tfplan",
-    "--source",
-    deployed.source.path
+    "--release",
+    deployed.release.path
   )
   expect(deployed.calls()[0].firstDeployPending).toBe("false")
 })
@@ -446,8 +456,8 @@ test("every Terraform run gets the installation's state bucket, which the update
     instance.gcp(
       "plan",
       "-out=terraform.tfplan",
-      "--source",
-      instance.source.path
+      "--release",
+      instance.release.path
     ).exitCode
   ).toBe(0)
   expect(instance.buckets()).toEqual([instance.store.bucket])
@@ -470,8 +480,8 @@ test("with a backend_override.tf, commands run in the installation's copy of the
         "--no-env-file",
         join(import.meta.dir, "gcp.ts"),
         ...args,
-        "--source",
-        instance.source.path,
+        "--release",
+        instance.release.path,
         "--instance-dir",
         instance.files.instance,
       ],
@@ -527,8 +537,8 @@ test("a check that passed before the operation record is taken is made again ins
       "--no-env-file",
       join(import.meta.dir, "gcp.ts"),
       "destroy",
-      "--source",
-      instance.source.path,
+      "--release",
+      instance.release.path,
       "--instance-dir",
       instance.files.instance,
     ],
@@ -541,18 +551,59 @@ test("a check that passed before the operation record is taken is made again ins
   ).toEqual([])
 })
 
-test("plan, apply, destroy and refresh need the app source checkout", () => {
+test("plan, apply, destroy and refresh need the release; refresh records its sourceSha and version", () => {
   const instance = initializedInstance([])
   for (const command of ["plan", "apply", "destroy", "refresh"]) {
     const child = instance.gcp(command)
     expect(child.exitCode).toBe(1)
-    expect(child.stderr.toString()).toContain("--source is required")
+    expect(child.stderr.toString()).toContain("--release is required")
   }
-  const refresh = instance.gcp("refresh", "--source", instance.source.path)
+  const next = fakeRelease(join(dirname(instance.files.instance), "next"), {
+    version: "4.498.0",
+    revision: "d".repeat(40),
+  })
+  const refresh = instance.gcp("refresh", "--release", next.path)
   expect(refresh.exitCode).toBe(0)
   expect(
-    JSON.parse(readFileSync(instance.files.vars, "utf8")).deployment.revision
-  ).toBe(instance.source.revision)
+    JSON.parse(readFileSync(instance.files.vars, "utf8")).deployment
+  ).toMatchObject({ revision: "d".repeat(40), version: "4.498.0" })
+})
+
+test("deploy runs the release's celld-install.js from its payload and keeps its output in install.log", () => {
+  const instance = initializedInstance(
+    ["module.gke.google_container_cluster.this"],
+    { fleets: { api: "azad-api" } }
+  )
+  const deploy = instance.gcp("deploy", "--release", instance.release.path)
+  expect(deploy.stderr.toString()).toBe("")
+  expect(deploy.exitCode).toBe(0)
+  const installed = readFileSync(
+    join(instance.release.path, "install-calls.jsonl"),
+    "utf8"
+  )
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+  expect(installed).toHaveLength(1)
+  expect(installed[0]).toMatchObject({
+    entry: "celld-install",
+    args: [],
+    cwd: instance.release.payload,
+    handoff: {
+      revision: instance.release.revision,
+      env_file: instance.files.settings,
+      state_directory: join(instance.files.directory, "celld-install"),
+      install_store: instance.store,
+      operation_id: "operation-fixture",
+    },
+  })
+  expect(deploy.stdout.toString()).toContain("celld-install ran")
+  expect(
+    readFileSync(
+      join(instance.files.directory, "celld-install", "install.log"),
+      "utf8"
+    )
+  ).toContain("celld-install ran")
 })
 
 test("--help prints the usage without an instance directory", () => {
@@ -575,7 +626,7 @@ test("--help prints the usage without an instance directory", () => {
 test("a failed Cloudflare lookup during setup reports its own reason", () => {
   const directory = mkdtempSync(join(tmpdir(), "azad-gcp-lookup-"))
   directories.push(directory)
-  const source = fakeSource(directory)
+  const release = fakeRelease(directory)
   const child = Bun.spawnSync(
     [
       process.execPath,
@@ -592,8 +643,8 @@ test("a failed Cloudflare lookup during setup reports its own reason", () => {
       input.webHost,
       "--account-id",
       account,
-      "--source",
-      source.path,
+      "--release",
+      release.path,
       "--instance-dir",
       join(directory, "instance"),
     ],

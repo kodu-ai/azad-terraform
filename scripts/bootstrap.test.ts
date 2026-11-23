@@ -20,6 +20,7 @@ import {
   type BootstrapConfig,
   type BootstrapDependencies,
 } from "./bootstrap"
+import { fakeRelease } from "./fixtures/source"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -28,6 +29,8 @@ afterEach(() => {
 })
 const account = "a".repeat(32)
 const zone = "b".repeat(32)
+/** A zone of its own for Mini Apps. */
+const appsZone = "e".repeat(32)
 const config: BootstrapConfig = {
   version: 1,
   accountId: account,
@@ -112,14 +115,15 @@ function fixture() {
       }
       if (url.pathname.endsWith("/zones")) {
         expect(auth).toBe(`Bearer ${remote.get("discovery")?.value}`)
+        const name = url.searchParams.get("name")
         return Response.json({
           success: true,
           result:
-            url.searchParams.get("name") === "example.com"
+            name === "example.com" || name === "example-apps.com"
               ? [
                   {
-                    id: zone,
-                    name: "example.com",
+                    id: name === "example.com" ? zone : appsZone,
+                    name,
                     account: { id: wrongAccount ? "d".repeat(32) : account },
                   },
                 ]
@@ -464,6 +468,54 @@ test("CLI rejects a non-private bootstrap file without echoing credentials", asy
   expect(f.remote.size).toBe(0)
 })
 
+test("CLI binds the configuration to the release's sourceSha before any request", () => {
+  const f = fixture()
+  const configFile = join(f.directory, "config.json")
+  const secretFile = join(f.directory, "bootstrap.env")
+  writeFileSync(configFile, JSON.stringify(config))
+  writeFileSync(
+    secretFile,
+    "CLOUDFLARE_BOOTSTRAP_API_TOKEN=never-print-this-fixture\n",
+    { mode: 0o600 }
+  )
+  const release = fakeRelease(f.directory, { revision: "d".repeat(40) })
+  const run = (env: Record<string, string>, ...extra: string[]) =>
+    Bun.spawnSync(
+      [
+        process.execPath,
+        "--no-env-file",
+        join(import.meta.dir, "bootstrap.ts"),
+        "plan",
+        "--config",
+        configFile,
+        "--bootstrap-file",
+        secretFile,
+        "--state-dir",
+        join(f.directory, "state"),
+        ...extra,
+      ],
+      {
+        env: { PATH: process.env.PATH, ...env },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    )
+  const missing = run({})
+  expect(missing.exitCode).toBe(1)
+  expect(missing.stderr.toString()).toContain("--release is required")
+  for (const child of [
+    run({}, "--release", release.path),
+    run({ AZAD_RELEASE: release.path }),
+  ]) {
+    expect(child.exitCode).toBe(1)
+    expect(child.stdout.toString()).toBe("")
+    expect(child.stderr.toString()).toContain(
+      `differs from the sourceSha of the release ${release.path} (4.497.0)`
+    )
+    expect(child.stderr.toString()).not.toContain("never-print-this-fixture")
+  }
+})
+
 test("CLI --help prints the usage; an unknown option gets the usage, not a generic failure", () => {
   const run = (...args: string[]) =>
     Bun.spawnSync(
@@ -582,6 +634,113 @@ test("certificate registration grants account certificate Write only when explic
     f.deps
   )
   expect(second.tokenIds).toEqual(first.tokenIds)
+})
+
+/** The policies the last apply gave each token. */
+function appliedTokens(directory: string) {
+  return JSON.parse(
+    readFileSync(join(directory, "terraform", "terraform.tfvars.json"), "utf8")
+  ).tokens as Record<
+    string,
+    {
+      policies: {
+        effect: string
+        permission_groups: { id: string }[]
+        resources: string
+      }[]
+    }
+  >
+}
+const groupId = (name: string) =>
+  groups.find(
+    (group) =>
+      group.name === name &&
+      group.scopes.includes("com.cloudflare.api.account.zone")
+  )?.id ?? ""
+
+test("a Mini Apps domain below a zone's apex adds certificate grants on that zone only", async () => {
+  const f = fixture()
+  const loader = {
+    ...config,
+    miniApps: false,
+    miniAppsDomain: "apps.example.com",
+  }
+  const result = await applyBootstrap(
+    loader,
+    "fake-bootstrap",
+    f.directory,
+    f.deps
+  )
+  // The Board's zone holds the Mini Apps domain too.
+  expect(result.zoneIds).toEqual([zone])
+  expect(Object.keys(result.tokenIds)).toEqual(["deployment"])
+  const deployment = appliedTokens(f.directory).deployment.policies
+  expect(deployment).toHaveLength(3)
+  expect(deployment[2]).toEqual({
+    effect: "allow",
+    permission_groups: [{ id: groupId("SSL and Certificates Write") }],
+    resources: JSON.stringify({
+      [`com.cloudflare.api.account.zone.${zone}`]: "*",
+    }),
+  })
+  expect(
+    JSON.parse(readFileSync(join(f.directory, "receipt.json"), "utf8"))
+      .miniAppsZone
+  ).toEqual({ id: zone, certificates: true })
+})
+
+test("a Mini Apps domain that is a zone of its own joins the deployment zones without certificate grants", async () => {
+  const f = fixture()
+  const result = await applyBootstrap(
+    { ...config, miniApps: false, miniAppsDomain: "example-apps.com" },
+    "fake-bootstrap",
+    f.directory,
+    f.deps
+  )
+  expect(result.zoneIds).toEqual([zone, appsZone].sort())
+  const deployment = appliedTokens(f.directory).deployment.policies
+  expect(deployment).toHaveLength(2)
+  expect(JSON.parse(deployment[1].resources)).toEqual({
+    [`com.cloudflare.api.account.zone.${zone}`]: "*",
+    [`com.cloudflare.api.account.zone.${appsZone}`]: "*",
+  })
+  expect(deployment[1].permission_groups).toEqual(
+    ["Zone Read", "DNS Write", "Workers Routes Write"].map((name) => ({
+      id: groupId(name),
+    }))
+  )
+  const missing = fixture()
+  await expect(
+    applyBootstrap(
+      { ...config, miniApps: false, miniAppsDomain: "apps.example.net" },
+      "fake-bootstrap",
+      missing.directory,
+      missing.deps
+    )
+  ).rejects.toThrow("No zone of this account holds the Mini Apps domain")
+})
+
+test("a Mini Apps domain excludes the Workers runtime token, Google Cloud and the Board's hosts", () => {
+  for (const invalid of [
+    { ...config, miniAppsDomain: "example-apps.com" },
+    {
+      ...config,
+      miniApps: false,
+      verifyDatabaseCertificate: false,
+      target: "gcp",
+      miniAppsDomain: "example-apps.com",
+    },
+    { ...config, miniApps: false, miniAppsDomain: "example.com" },
+    { ...config, miniApps: false, miniAppsDomain: "x.board.example.com" },
+  ])
+    expect(() => bootstrapConfigSchema.parse(invalid)).toThrow()
+  expect(
+    bootstrapConfigSchema.parse({
+      ...config,
+      miniApps: false,
+      miniAppsDomain: "testing.example.com",
+    }).miniAppsDomain
+  ).toBe("testing.example.com")
 })
 
 test("Google Cloud deployments get only zone DNS, Origin CA and Configuration Rule grants", () => {

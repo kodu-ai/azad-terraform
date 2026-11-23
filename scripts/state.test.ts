@@ -1,14 +1,6 @@
 import { afterEach, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -17,16 +9,13 @@ import {
   terraformArguments,
 } from "./instance"
 import {
-  assertMoved,
   backendConfig,
   backendEnvironment,
   cloudflarePrefix,
   cloudflareStore,
   configureBackend,
   gcpStore,
-  moveLocalState,
   withOperation,
-  type TerraformRun,
 } from "./state"
 
 const directories: string[] = []
@@ -166,107 +155,6 @@ test("init creates a private, versioned GCS bucket in the installation's region"
       googleToken: () => "google-token",
     })
   ).rejects.toThrow("taken by another project")
-})
-
-/** A remote backend `terraform state pull/push` talk to. */
-function remoteBackend(initial?: object) {
-  // An empty backend answers `state pull` with an empty state, as R2 does.
-  let remote = JSON.stringify(
-    initial ?? { version: 4, serial: 0, lineage: "", resources: [] }
-  )
-  const run: TerraformRun = (args) => {
-    if (args[0] === "state" && args[1] === "pull")
-      return { status: 0, stdout: remote }
-    if (args[0] === "state" && args[1] === "push") {
-      remote = readFileSync(args.at(-1) ?? "", "utf8")
-      return { status: 0, stdout: "" }
-    }
-    return { status: 1, stdout: "" }
-  }
-  return { run, remote: () => remote }
-}
-const localState = {
-  version: 4,
-  serial: 7,
-  lineage: "lineage-a",
-  resources: [{ type: "x" }],
-}
-
-test("init moves an existing local state into the bucket and keeps a copy", () => {
-  const files = instance()
-  writeFileSync(files.state, JSON.stringify(localState))
-  writeFileSync(
-    `${files.state}.backup`,
-    JSON.stringify({ ...localState, serial: 6 })
-  )
-  const backend = remoteBackend()
-  const kept = moveLocalState(
-    files,
-    backend.run,
-    new Date("2026-11-05T00:00:00Z")
-  )
-  expect(JSON.parse(backend.remote())).toEqual(localState)
-  expect(kept).toBe(`${files.state}.before-remote-2026-11-05T00-00-00-000Z`)
-  expect(JSON.parse(readFileSync(kept ?? "", "utf8"))).toEqual(localState)
-  // Nothing is left where a release before 0.1.0 would read it.
-  expect(existsSync(files.state)).toBe(false)
-  expect(existsSync(`${files.state}.backup`)).toBe(false)
-  // A second init has nothing to move.
-  expect(moveLocalState(files, backend.run)).toBeUndefined()
-})
-
-test("an interrupted move finishes; another installation's state is never overwritten", () => {
-  const moved = instance()
-  writeFileSync(moved.state, JSON.stringify(localState))
-  // Terraform gives a moved state a new lineage; its contents are what count.
-  expect(
-    moveLocalState(
-      moved,
-      remoteBackend({ ...localState, lineage: "new", serial: 1 }).run
-    )
-  ).toBeDefined()
-
-  const other = instance()
-  writeFileSync(other.state, JSON.stringify(localState))
-  const backend = remoteBackend({
-    ...localState,
-    lineage: "lineage-b",
-    resources: [{ type: "y" }],
-  })
-  expect(() => moveLocalState(other, backend.run)).toThrow("a different state")
-  expect(JSON.parse(readFileSync(other.state, "utf8"))).toEqual(localState)
-  expect(JSON.parse(backend.remote()).lineage).toBe("lineage-b")
-})
-
-test("the empty state GCS creates with its own lineage counts as empty", () => {
-  const files = instance("gcp-celld")
-  writeFileSync(files.state, JSON.stringify(localState))
-  const backend = remoteBackend({
-    version: 4,
-    serial: 1,
-    lineage: "gcs-generated",
-    resources: [],
-    outputs: {},
-  })
-  expect(moveLocalState(files, backend.run)).toBeDefined()
-  expect(JSON.parse(backend.remote()).resources).toEqual(localState.resources)
-})
-
-test("until the move completes, every other command is refused", () => {
-  const files = instance()
-  writeFileSync(files.state, JSON.stringify(localState))
-  expect(() => assertMoved(files, "the init command")).toThrow(
-    "the init command"
-  )
-  writeFileSync(files.state, JSON.stringify({ ...localState, resources: [] }))
-  expect(() => assertMoved(files, "init")).not.toThrow()
-})
-
-test("a local state without resources is left alone", () => {
-  const files = instance()
-  writeFileSync(files.state, JSON.stringify({ ...localState, resources: [] }))
-  expect(moveLocalState(files, remoteBackend().run)).toBeUndefined()
-  expect(readdirSync(files.directory)).toEqual(["terraform.tfstate"])
 })
 
 test("a command that changes the installation holds the operation record until it ends", () => {

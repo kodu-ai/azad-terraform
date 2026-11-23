@@ -143,7 +143,7 @@ run "hands_the_deploy_its_infrastructure" {
   }
   assert {
     condition     = !contains(keys(output.deploy), "revision")
-    error_message = "The driver adds the source revision; Terraform does not decide what deploys."
+    error_message = "The driver adds the release revision; Terraform does not decide what deploys."
   }
 }
 

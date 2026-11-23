@@ -1,5 +1,5 @@
 output "handoff" {
-  description = "AZAD_CELLD_INSTALL for scripts/self-host/celld-install.ts without its revision, which the drivers add. Holds the database and managed Git passwords."
+  description = "AZAD_CELLD_INSTALL for the release's payload/installer/celld-install.js without its revision, which the drivers add. Holds the database and managed Git passwords."
   sensitive   = true
   value       = local.handoff
 }

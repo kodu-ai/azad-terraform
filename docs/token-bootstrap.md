@@ -2,8 +2,8 @@
 
 The optional bootstrap helper accepts one administrator token and uses the
 existing official Cloudflare Terraform provider to create scoped deployment
-credentials. Existing installations can continue supplying `CLOUDFLARE_API_TOKEN`
-manually. This helper creates tokens only. The normal customer setup, Terraform
+credentials. You can also create `CLOUDFLARE_API_TOKEN` yourself with the
+permissions below. This helper creates tokens only. The normal customer setup, Terraform
 plan/apply, migrations and application deployment run afterward.
 
 ## Administrator credential
@@ -43,21 +43,27 @@ A non-secret configuration file contains:
   "version": 1,
   "accountId": "0123456789abcdef0123456789abcdef",
   "webHost": "board.example.com",
-  "apiHost": "api.example.com",
-  "revision": "FULL_40_CHARACTER_SOURCE_COMMIT",
-  "miniApps": true,
+  "apiHost": "api.board.example.com",
+  "revision": "THE_RELEASE_SOURCESHA",
+  "miniApps": false,
+  "miniAppsDomain": "apps.example.com",
   "verifyDatabaseCertificate": true,
   "registerDatabaseCertificate": true
 }
 ```
 
+`miniAppsDomain` is the domain `cloudflare.ts setup --miniapps-domain` gets:
+Mini Apps on the loader provider. Leave it out with `--miniapps-domain none`.
+`miniApps: true` instead mints the separate runtime token for Mini Apps as
+Workers with D1 (`V3_CF_API_TOKEN`); the two are exclusive.
+
 Optional fields: `"target": "gcp"` for Azad on Google Cloud, where Cloudflare
 only serves DNS and TLS (the deployment token then gets Zone Read, DNS Write,
 SSL and Certificates Write and Config Settings Write on the zones, and
-`miniApps` and `verifyDatabaseCertificate` must be false); `"managedSource":
-true` adds an Artifacts token (and, on Cloudflare, a Queues token for its push
-events). Managed source can be added to a completed bootstrap later, never
-removed.
+`miniApps`, `miniAppsDomain` and `verifyDatabaseCertificate` must be unset or
+false); `"managedSource": true` adds an Artifacts token (and, on Cloudflare,
+a Queues token for its push events). Managed source can be added to a
+completed bootstrap later, never removed.
 
 `verifyDatabaseCertificate` requests account **SSL and Certificates Read** for
 an existing Hyperdrive CA ID. Optional `registerDatabaseCertificate` defaults to
@@ -73,18 +79,18 @@ bun --no-env-file scripts/bootstrap.ts plan \
   --config /private/bootstrap.json \
   --bootstrap-file /private/bootstrap.env \
   --state-dir ~/.azad/instances/default/cloudflare-bootstrap \
-  --source ~/src/azad
+  --release ~/azad-release
 
 bun --no-env-file scripts/bootstrap.ts apply \
   --config /private/bootstrap.json \
   --bootstrap-file /private/bootstrap.env \
   --state-dir ~/.azad/instances/default/cloudflare-bootstrap \
-  --source ~/src/azad
+  --release ~/azad-release
 ```
 
-`revision` must be the `HEAD` of the Azad source checkout the installation
-deploys: `--source`, else `AZAD_SOURCE`, else the current directory. Nothing
-of the app runs here; the revision only binds the receipt to that source.
+`revision` must be the `sourceSha` in the `release.json` of the unpacked
+release the installation deploys: `--release`, else `AZAD_RELEASE`. Nothing
+of the app runs here; the revision only binds the receipt to that release.
 
 `plan` is a **read-only bootstrap permission preview**, not a workload Terraform
 plan. It reads the official permission catalog and checks required groups. It
@@ -93,9 +99,10 @@ Its JSON explicitly reports `zonesResolvedDuringApply: true`.
 
 `apply` performs these steps:
 
-1. Check the source/instance receipt and token inventory against retained state.
+1. Check the installation receipt and token inventory against retained state.
 2. Create a temporary **Zone Read** token scoped to zones in the selected account.
-3. Find the authoritative zone for each selected hostname in that account.
+3. Find the authoritative zone for each selected hostname in that account, and
+   the zone that holds `miniAppsDomain` (the longest zone name it ends with).
 4. Create the deployment token and, if selected, a separate Mini Apps token.
    Delete the temporary discovery token through the same Terraform state.
 5. Write the private credential handoff and completion receipt.
@@ -104,24 +111,34 @@ Every Terraform mutation uses a saved plan. The helper rejects an unexpected
 resource, deletion of a retained deployment token, or recreation of a previously
 saved token.
 
-The deployment token has Account Settings Read, Workers Scripts Write, Workers R2
-Storage Write, Queues Write, Hyperdrive Write, Pages Write, Secrets Store
-Write and Workers Containers Write on the selected account. A deployment
-token minted before Secrets Store Write or Workers Containers Write was added
-needs them added once: edit the token in the Cloudflare dashboard (Account,
-Secrets Store, Edit; Account, Workers Containers, Edit); its value stays the
-same. Workers Containers Write is used only with console release updates (`updater_image`), to push the
-updater image into the account's registry and create its Container. With verified database TLS selected, it also has Account: SSL and
-Certificates Read, or Write when automatic CA registration is selected. Zone Read, DNS Write and Workers Routes Write apply only to
-the discovered zones. Cloudflare's dashboard calls many API `Write` permissions
-`Edit`. The helper resolves IDs from the official catalog and checks the resource
-scope; it never grants token-management permissions to derived tokens.
+The deployment token has, on the selected account, Account Settings Read,
+Workers Scripts Write, Workers R2 Storage Write, Queues Write, Hyperdrive
+Write, Pages Write, Secrets Store Write (the installation's keys) and Workers
+Containers Write (used only with console release updates, `updater_image`, to
+push the updater image into the account's registry and create its
+Container). With verified database TLS selected, it also has Account: SSL and
+Certificates Read, or Write when automatic CA registration is selected.
 
-The optional Mini Apps token has Workers Scripts Write and D1 Write on the same
-account. It is separate from the deployment credential because the application
-uses it at runtime. Other optional credentials, including managed Artifacts and
-its event subscription token, keep their existing explicit configuration path.
-The bootstrap does not guess those grants or create S3/state-bucket credentials.
+Zone Read, DNS Write and Workers Routes Write apply only to the discovered
+zones: the zones of the Board's hosts and the zone that holds
+`miniAppsDomain`. In that zone Terraform adds the wildcard record
+`*.<miniAppsDomain>`, and the deploy adds the API Worker's route
+`*.<miniAppsDomain>/*` (Zone Read lets it find the zone). When
+`miniAppsDomain` is below its zone's apex, the token also gets SSL and
+Certificates Write on that zone alone: Terraform orders an advanced
+certificate for `<miniAppsDomain>` and `*.<miniAppsDomain>`, which needs
+Advanced Certificate Manager on the zone.
+
+Cloudflare's dashboard calls many API `Write` permissions `Edit`. The helper
+resolves IDs from the official catalog and checks the resource scope; it
+never grants token-management permissions to derived tokens.
+
+The Mini Apps token (`miniApps: true`) has Workers Scripts Write and D1 Write
+on the same account. It is separate from the deployment credential because
+the application uses it at runtime. Other optional credentials, including
+managed Artifacts and its event subscription token, keep their own explicit
+configuration path. The bootstrap does not guess those grants or create
+S3/state-bucket credentials.
 
 ## Result and handoff
 
@@ -136,14 +153,16 @@ Successful apply writes and prints this value-free JSON shape:
 {
   "version": 1,
   "accountId": "0123456789abcdef0123456789abcdef",
-  "sourceRevision": "FULL_40_CHARACTER_CHECKOUT_COMMIT",
+  "sourceRevision": "THE_RELEASE_SOURCESHA",
   "zoneIds": ["ZONE_ID"],
   "tokenIds": {"deployment": "TOKEN_ID", "miniapps": "TOKEN_ID"},
   "credentialsFile": "/private/installation/cloudflare-bootstrap/credentials.env"
 }
 ```
 
-`miniapps` is absent when disabled. `credentials.env` contains only
+`miniapps` is absent unless `miniApps` is true. `zoneIds` includes the Mini
+Apps domain's zone. `sourceRevision` is the release's `sourceSha`.
+`credentials.env` contains only
 `CLOUDFLARE_API_TOKEN` and, when selected, `V3_CF_API_TOKEN` (and the managed
 project source tokens when `managedSource` is selected). Merge it into the
 instance's private `.env` (the `azad` installer does this), then run the
@@ -159,12 +178,13 @@ This local administrator state is separate from the installation's own
 Terraform state. Updates use the derived deployment token; they do not mint
 tokens.
 
-The receipt binds the account, hostnames, feature selection and source revision.
-Retry the same command from that same source with the same files. A completed
+The receipt binds the account, hostnames, feature selection (the Mini Apps
+domain included) and release revision. Retry the same command with the same
+release and files. A completed
 retry retains the token identities and values, and verifies each credential itself
 with Cloudflare before reuse or handoff. A token whose secret was rolled is refused
 even when its ID and active status are unchanged. Missing state, a different
-administrator's token inventory, revoked credentials, or source/target drift stops
+administrator's token inventory, revoked credentials, or release/target drift stops
 before replacement. Importing token IDs cannot recover their secret values.
 Restore the original directory and configuration rather than starting over.
 

@@ -4,8 +4,8 @@ mock_provider "cloudflare" {
   }
 }
 variables {
-  # The Azad app source checkout; plans never run its entrypoints.
-  source_dir   = "/opt/azad"
+  # The unpacked Azad release; plans never run its entrypoints.
+  release_dir  = "/opt/azad-release"
   database_url = "postgresql://azad:a%40b%20c%2B%2F@ep-test.eu-central-1.aws.neon.tech:5432/azad?sslmode=verify-full"
   cloudflare = {
     account_id = "00000000000000000000000000000000"
@@ -208,4 +208,35 @@ run "board_hosts_are_reserved_from_zone_wide_routes" {
     condition     = toset(module.base.reserved_routes) == toset(["board.example.com/*", "api.board.example.com/*"])
     error_message = "Both Board hosts need a hostname route that runs no Worker."
   }
+}
+
+run "no_miniapp_domain_without_the_loader" {
+  command = plan
+  assert {
+    condition     = output.miniapps == null
+    error_message = "Without AZAD_SELF_HOST_MINIAPPS=loader nothing is created for Mini Apps."
+  }
+}
+
+run "the_loader_domain_gets_a_wildcard_and_a_certificate" {
+  command = plan
+  variables {
+    miniapp_base_domain = "apps.example.com"
+  }
+  override_module {
+    target  = module.base.module.miniapp_domain[0].module.zone
+    outputs = { zone = { id = "11111111111111111111111111111111", name = "example.com" } }
+  }
+  assert {
+    condition     = output.miniapps.domain == "apps.example.com" && output.miniapps.zone == "example.com" && output.miniapps.wildcard == "*.apps.example.com"
+    error_message = "The Mini Apps domain gets its wildcard record in the zone that holds it."
+  }
+}
+
+run "the_loader_domain_stays_apart_from_the_board_hosts" {
+  command = plan
+  variables {
+    miniapp_base_domain = "example.com"
+  }
+  expect_failures = [var.miniapp_base_domain]
 }

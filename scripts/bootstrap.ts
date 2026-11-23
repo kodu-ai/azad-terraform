@@ -17,7 +17,7 @@ import { parse } from "dotenv"
 import { z } from "zod"
 import { REPOSITORY } from "./instance"
 import { isolatedProcessEnv, writePrivateJson } from "./lib"
-import { sourceOption } from "./source"
+import { ReleaseError, requireRelease } from "./source"
 
 /**
  * Creates an installation's scoped Cloudflare API tokens (roots/bootstrap)
@@ -25,11 +25,11 @@ import { sourceOption } from "./source"
  *
  *   bun scripts/bootstrap.ts plan|apply --config FILE \
  *     --bootstrap-file PRIVATE_ENV --state-dir PRIVATE_DIRECTORY \
- *     [--source APP_CHECKOUT]
+ *     --release RELEASE_DIR
  *
- * The configuration's `revision` must be the HEAD of the Azad app source
- * checkout the installation deploys: `--source`, else AZAD_SOURCE, else the
- * current directory. Nothing of the app runs here.
+ * The configuration's `revision` must be the `sourceSha` of the Azad
+ * release the installation deploys: `--release`, else AZAD_RELEASE.
+ * Nothing of the app runs here.
  */
 
 class BootstrapError extends Error {
@@ -47,7 +47,15 @@ export const bootstrapConfigSchema = z
     webHost: host,
     apiHost: host,
     revision: z.string().regex(/^[a-f0-9]{40}$/u),
+    /** Mini Apps as Workers with D1: a separate runtime token (`V3_CF_API_TOKEN`). */
     miniApps: z.boolean(),
+    /**
+     * Mini Apps on the loader provider (`--miniapps-domain`): the domain they
+     * serve under, a zone of the account or a subdomain inside one. The
+     * deployment token also gets the zone that holds it, and SSL and
+     * Certificates Write there when the domain is below the zone's apex.
+     */
+    miniAppsDomain: host.optional(),
     verifyDatabaseCertificate: z.boolean(),
     registerDatabaseCertificate: z.boolean().optional(),
     /**
@@ -64,8 +72,25 @@ export const bootstrapConfigSchema = z
   .refine(
     (config) =>
       config.target !== "gcp" ||
-      (!config.miniApps && !config.verifyDatabaseCertificate),
+      (!config.miniApps &&
+        !config.miniAppsDomain &&
+        !config.verifyDatabaseCertificate),
     "On Google Cloud, Mini Apps and database TLS need no Cloudflare credential."
+  )
+  .refine(
+    (config) => !(config.miniApps && config.miniAppsDomain),
+    "Choose one Mini Apps provider: miniApps (Workers with D1) or miniAppsDomain (the loader provider)."
+  )
+  .refine(
+    (config) =>
+      !config.miniAppsDomain ||
+      [config.webHost, config.apiHost].every(
+        (board) =>
+          board !== config.miniAppsDomain &&
+          !board.endsWith(`.${config.miniAppsDomain}`) &&
+          !config.miniAppsDomain?.endsWith(`.${board}`)
+      ),
+    "miniAppsDomain must be apart from the web and API hosts: not one of them, above one or below one."
   )
   .refine(
     (config) =>
@@ -98,9 +123,15 @@ const receiptSchema = z
     config: bootstrapConfigSchema,
     phase: z.enum(["prepared", "discovery", "ready", "complete"]),
     zoneIds: z.array(id),
+    miniAppsZone: z
+      .object({ id, certificates: z.boolean() })
+      .strict()
+      .optional(),
   })
   .strict()
 type Receipt = z.infer<typeof receiptSchema>
+/** The zone that holds the Mini Apps domain; `certificates` below its apex. */
+export type MiniAppsZone = { id: string; certificates: boolean }
 const accountScope = "com.cloudflare.api.account"
 const zoneScope = "com.cloudflare.api.account.zone"
 const deploymentAccountGroups = [
@@ -180,12 +211,18 @@ export function deploymentGroups(config: BootstrapConfig): DeploymentGrants {
   }
 }
 
-/** Plans only the deployment grants required by selected features, with no management permission in any derived token. */
+/**
+ * Plans only the deployment grants required by selected features, with no
+ * management permission in any derived token. `zoneIds` are every discovered
+ * zone, the Mini Apps zone's included; below its apex that zone also gets
+ * SSL and Certificates Write, for the advanced certificate of its hosts.
+ */
 export function tokenPolicies(
   config: BootstrapConfig,
   groups: Group[],
   zoneIds: string[],
-  discovery: boolean
+  discovery: boolean,
+  miniAppsZone?: MiniAppsZone
 ) {
   const account = { [`${accountScope}.${config.accountId}`]: "*" }
   const tokens: Tokens = {}
@@ -214,6 +251,13 @@ export function tokenPolicies(
             zoneIds.map((zone) => [`${zoneScope}.${zone}`, "*"])
           )
         ),
+        ...(miniAppsZone?.certificates
+          ? [
+              policy(groups, ["SSL and Certificates Write"], zoneScope, {
+                [`${zoneScope}.${miniAppsZone.id}`]: "*",
+              }),
+            ]
+          : []),
       ],
     }
     if (config.miniApps)
@@ -330,42 +374,65 @@ async function listTokens(deps: BootstrapDependencies, token: string) {
     "The token inventory exceeds the bootstrap lookup limit; no tokens were changed."
   )
 }
+/** The account's zone that holds `hostname`: the longest matching zone name. */
+async function zoneOf(
+  deps: BootstrapDependencies,
+  token: string,
+  config: BootstrapConfig,
+  hostname: string
+) {
+  const labels = hostname.split(".")
+  for (let offset = 0; offset < labels.length - 1; offset++) {
+    const name = labels.slice(offset).join(".")
+    const rows = await api(
+      deps,
+      token,
+      `/zones?name=${encodeURIComponent(name)}&account.id=${config.accountId}&per_page=50`,
+      z.array(z.object({ id, name: z.string(), account: z.object({ id }) }))
+    )
+    if (rows.length === 0) continue
+    if (
+      rows.length !== 1 ||
+      rows[0].name !== name ||
+      rows[0].account.id !== config.accountId
+    )
+      throw new BootstrapError(
+        "Cloudflare zone lookup returned an ambiguous or different account/hostname. No deployment token was created."
+      )
+    return { id: rows[0].id, name }
+  }
+  return undefined
+}
+
+/** The zones of the Board's hosts and of the Mini Apps domain. */
 async function zones(
   deps: BootstrapDependencies,
   token: string,
   config: BootstrapConfig
-) {
+): Promise<{ zoneIds: string[]; miniAppsZone?: MiniAppsZone }> {
   const result = new Set<string>()
   for (const hostname of [config.webHost, config.apiHost]) {
-    const labels = hostname.split(".")
-    let found = false
-    for (let offset = 0; offset < labels.length - 1; offset++) {
-      const name = labels.slice(offset).join(".")
-      const rows = await api(
-        deps,
-        token,
-        `/zones?name=${encodeURIComponent(name)}&account.id=${config.accountId}&per_page=50`,
-        z.array(z.object({ id, name: z.string(), account: z.object({ id }) }))
-      )
-      if (rows.length === 0) continue
-      if (
-        rows.length !== 1 ||
-        rows[0].name !== name ||
-        rows[0].account.id !== config.accountId
-      )
-        throw new BootstrapError(
-          "Cloudflare zone lookup returned an ambiguous or different account/hostname. No deployment token was created."
-        )
-      result.add(rows[0].id)
-      found = true
-      break
-    }
-    if (!found)
+    const zone = await zoneOf(deps, token, config, hostname)
+    if (!zone)
       throw new BootstrapError(
         "No authoritative zone was found for a selected hostname in this account. Preserve bootstrap state and correct the account/domain selection."
       )
+    result.add(zone.id)
   }
-  return [...result].sort()
+  let miniAppsZone: MiniAppsZone | undefined
+  if (config.miniAppsDomain) {
+    const zone = await zoneOf(deps, token, config, config.miniAppsDomain)
+    if (!zone)
+      throw new BootstrapError(
+        "No zone of this account holds the Mini Apps domain. Preserve bootstrap state, add the zone to the account or correct miniAppsDomain."
+      )
+    result.add(zone.id)
+    miniAppsZone = {
+      id: zone.id,
+      certificates: zone.name !== config.miniAppsDomain,
+    }
+  }
+  return { zoneIds: [...result].sort(), miniAppsZone }
 }
 function privateFile(path: string) {
   const stat = lstatSync(path)
@@ -474,7 +541,7 @@ async function reconcile(
   }
   await verifyValues(deps, values)
 }
-/** Same installation and source; managed project source may be added, never removed. */
+/** Same installation and release revision; managed project source may be added, never removed. */
 function checkConfig(receipt: Receipt, config: BootstrapConfig) {
   const comparable = (value: BootstrapConfig) =>
     JSON.stringify({
@@ -488,7 +555,7 @@ function checkConfig(receipt: Receipt, config: BootstrapConfig) {
     (receipt.config.managedSource === true && config.managedSource !== true)
   )
     throw new BootstrapError(
-      "Bootstrap configuration/source differs from its saved receipt. Resume with the original selected source and configuration."
+      "Bootstrap configuration (account, hostnames, features or release revision) differs from its saved receipt. Resume with the original configuration and release."
     )
 }
 
@@ -504,8 +571,17 @@ export async function planBootstrap(
     "/user/tokens/permission_groups",
     z.array(groupSchema)
   )
-  // Validate every required group before creating even the discovery credential.
-  const sample = tokenPolicies(config, groups, ["0".repeat(32)], true)
+  // Validate every required group before creating even the discovery
+  // credential; a Mini Apps domain may need certificate grants.
+  const sample = tokenPolicies(
+    config,
+    groups,
+    ["0".repeat(32)],
+    true,
+    config.miniAppsDomain
+      ? { id: "0".repeat(32), certificates: true }
+      : undefined
+  )
   return {
     version: 1,
     accountId: config.accountId,
@@ -516,7 +592,13 @@ export async function planBootstrap(
       ...deploymentGroups(config).account,
       ...deploymentGroups(config).zone,
     ],
+    // Granted on the zone that holds the Mini Apps domain when the domain is
+    // below that zone's apex; apply resolves which.
+    miniAppsZonePermissions: config.miniAppsDomain
+      ? ["SSL and Certificates Write"]
+      : [],
     miniApps: config.miniApps,
+    miniAppsDomain: config.miniAppsDomain ?? null,
     managedSource: config.managedSource ?? false,
     zonesResolvedDuringApply: true,
   }
@@ -588,7 +670,7 @@ export async function applyBootstrap(
         )
     } else if (existsSync(state))
       throw new BootstrapError(
-        "Bootstrap state exists without its source/instance receipt. Restore both files together."
+        "Bootstrap state exists without its installation receipt. Restore both files together."
       )
     let values = readValues(state)
     await reconcile(deps, bootstrapToken, config, values)
@@ -598,7 +680,15 @@ export async function applyBootstrap(
       "/user/tokens/permission_groups",
       z.array(groupSchema)
     )
-    tokenPolicies(config, groups, ["0".repeat(32)], true)
+    tokenPolicies(
+      config,
+      groups,
+      ["0".repeat(32)],
+      true,
+      config.miniAppsDomain
+        ? { id: "0".repeat(32), certificates: true }
+        : undefined
+    )
     writePrivateJson(receiptPath, receipt)
     mkdirSync(root, { recursive: true, mode: 0o700 })
     for (const name of [
@@ -710,11 +800,21 @@ export async function applyBootstrap(
         throw new BootstrapError(
           "Terraform did not retain the discovery token in private state."
         )
-      receipt.zoneIds = await zones(deps, values.discovery.value, config)
+      const found = await zones(deps, values.discovery.value, config)
+      receipt.zoneIds = found.zoneIds
+      if (found.miniAppsZone) receipt.miniAppsZone = found.miniAppsZone
       receipt.phase = "ready"
       writePrivateJson(receiptPath, receipt)
     }
-    values = await apply(tokenPolicies(config, groups, receipt.zoneIds, false))
+    values = await apply(
+      tokenPolicies(
+        config,
+        groups,
+        receipt.zoneIds,
+        false,
+        receipt.miniAppsZone
+      )
+    )
     if (
       !values.deployment ||
       (config.miniApps && !values.miniapps) ||
@@ -753,7 +853,7 @@ export async function applyBootstrap(
 }
 
 const USAGE =
-  "Usage: bootstrap.ts plan|apply --config FILE --bootstrap-file PRIVATE_ENV --state-dir PRIVATE_DIRECTORY [--source APP_CHECKOUT]\n--source may instead come from AZAD_SOURCE; without either it is the current directory."
+  "Usage: bootstrap.ts plan|apply --config FILE --bootstrap-file PRIVATE_ENV --state-dir PRIVATE_DIRECTORY --release RELEASE_DIR\n--release names an unpacked Azad release and may instead come from AZAD_RELEASE."
 
 function cliArguments() {
   try {
@@ -762,7 +862,7 @@ function cliArguments() {
         config: { type: "string" },
         "bootstrap-file": { type: "string" },
         "state-dir": { type: "string" },
-        source: { type: "string" },
+        release: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
       allowPositionals: true,
@@ -795,17 +895,10 @@ async function main() {
     .object({ CLOUDFLARE_BOOTSTRAP_API_TOKEN: z.string().trim().min(1) })
     .strict()
     .parse(parse(privateFile(values["bootstrap-file"])))
-  const source = resolve(sourceOption(values.source) ?? ".")
-  const head = await dependencies
-    .run(["git", "-C", source, "rev-parse", "HEAD"], isolatedProcessEnv())
-    .catch(() => {
-      throw new BootstrapError(
-        `${source} is not a Git checkout of the Azad app source. Pass it with --source or AZAD_SOURCE.`
-      )
-    })
-  if (head.trim() !== config.revision)
+  const release = requireRelease(values.release)
+  if (release.revision !== config.revision)
     throw new BootstrapError(
-      "Selected source revision differs from checkout HEAD."
+      `The configuration's revision differs from the sourceSha of the release ${release.path} (${release.version}).`
     )
   const token = env.CLOUDFLARE_BOOTSTRAP_API_TOKEN
   const result =
@@ -821,7 +914,7 @@ if (import.meta.main) {
     await main()
   } catch (error) {
     process.stderr.write(
-      `${error instanceof BootstrapError ? error.message : "Token bootstrap failed. Check private input formats, token-management authority and preserved state; credential details are not logged."}\n`
+      `${error instanceof BootstrapError || error instanceof ReleaseError ? error.message : "Token bootstrap failed. Check private input formats, token-management authority and preserved state; credential details are not logged."}\n`
     )
     process.exitCode = 1
   }

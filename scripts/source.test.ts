@@ -8,12 +8,13 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { fakeSource } from "./fixtures/source"
+import { fakeRelease, FIXTURE_RELEASE } from "./fixtures/source"
 import {
-  requireSource,
+  installer,
+  ReleaseError,
+  requireRelease,
   SettingsRefused,
   sourceSettings,
-  SourceError,
 } from "./source"
 
 const directories: string[] = []
@@ -23,12 +24,12 @@ afterEach(() => {
 })
 
 function temporary() {
-  const directory = mkdtempSync(join(tmpdir(), "azad-source-"))
+  const directory = mkdtempSync(join(tmpdir(), "azad-release-"))
   directories.push(directory)
   return directory
 }
 
-/** The calls the fake checkout's settings entrypoint recorded. */
+/** The calls the fake release's settings entrypoint recorded. */
 function calls(path: string) {
   return readFileSync(join(path, "calls.jsonl"), "utf8")
     .split("\n")
@@ -36,40 +37,61 @@ function calls(path: string) {
     .map((line) => JSON.parse(line))
 }
 
-test("a source checkout comes from --source, else AZAD_SOURCE, and binds to its HEAD", () => {
-  const source = fakeSource(temporary())
-  expect(requireSource(source.path, {})).toEqual(source)
-  expect(requireSource(undefined, { AZAD_SOURCE: source.path })).toEqual(source)
-  expect(() => requireSource(undefined, {})).toThrow(SourceError)
-  expect(() => requireSource(undefined, {})).toThrow("--source is required")
+test("a release comes from --release, else AZAD_RELEASE, and binds to its sourceSha and version", () => {
+  const release = fakeRelease(temporary())
+  expect(requireRelease(release.path, {})).toEqual({
+    path: release.path,
+    payload: join(release.path, "payload"),
+    version: FIXTURE_RELEASE.version,
+    revision: FIXTURE_RELEASE.revision,
+  })
+  expect(requireRelease(undefined, { AZAD_RELEASE: release.path })).toEqual(
+    release
+  )
+  expect(() => requireRelease(undefined, {})).toThrow(ReleaseError)
+  expect(() => requireRelease(undefined, {})).toThrow("--release is required")
 })
 
-test("anything but the top level of an Azad source checkout with its dependencies is refused", () => {
+test("anything but an unpacked release with its four installer entrypoints is refused", () => {
   const directory = temporary()
-  expect(() => requireSource(join(directory, "missing"), {})).toThrow(
+  expect(() => requireRelease(join(directory, "missing"), {})).toThrow(
     "does not exist"
   )
   mkdirSync(join(directory, "plain"))
-  expect(() => requireSource(join(directory, "plain"), {})).toThrow(
-    "is not a Git checkout"
+  expect(() => requireRelease(join(directory, "plain"), {})).toThrow(
+    "has no release.json"
   )
-  const source = fakeSource(directory)
-  expect(() => requireSource(join(source.path, "scripts"), {})).toThrow(
-    "pass the checkout's top-level directory"
+  const release = fakeRelease(directory)
+  const manifest = join(release.path, "release.json")
+  const valid = readFileSync(manifest, "utf8")
+  for (const broken of [
+    "not json",
+    JSON.stringify({ ...JSON.parse(valid), format: 2 }),
+    JSON.stringify({ ...JSON.parse(valid), sourceSha: "HEAD" }),
+    JSON.stringify({ ...JSON.parse(valid), signed: undefined }),
+  ]) {
+    writeFileSync(manifest, broken)
+    expect(() => requireRelease(release.path, {})).toThrow(
+      "is not a release manifest this version reads"
+    )
+  }
+  writeFileSync(
+    manifest,
+    JSON.stringify({ ...JSON.parse(valid), signed: true, agentConnect: null })
   )
-  rmSync(join(source.path, "node_modules"), { recursive: true })
-  expect(() => requireSource(source.path, {})).toThrow(
-    `Run: bun install --frozen-lockfile --cwd ${source.path}`
+  expect(requireRelease(release.path, {}).revision).toBe(
+    FIXTURE_RELEASE.revision
   )
-  rmSync(join(source.path, "scripts/self-host/settings.ts"))
-  expect(() => requireSource(source.path, {})).toThrow(
-    "lacks scripts/self-host/settings.ts"
+  rmSync(installer(release, "celld-install"))
+  rmSync(installer(release, "settings"))
+  expect(() => requireRelease(release.path, {})).toThrow(
+    "lacks payload/installer/settings.js, payload/installer/celld-install.js"
   )
 })
 
-test("setup asks the source's settings entrypoint, with the settings on stdin", () => {
-  const source = fakeSource(temporary())
-  const app = sourceSettings(source)
+test("setup asks the release's settings entrypoint from its payload, with the settings on stdin", () => {
+  const release = fakeRelease(temporary())
+  const app = sourceSettings(release)
   expect(app.resourcePrefix("https://api.board.example.com")).toBe(
     "azad-fixture-prefix"
   )
@@ -84,39 +106,42 @@ test("setup asks the source's settings entrypoint, with the settings on stdin", 
     region: undefined,
   })
   app.validate("celld", { CLERK_SECRET_KEY: "sk_test_fixture" })
-  expect(calls(source.path)).toEqual([
+  const cwd = release.payload
+  expect(calls(release.path)).toEqual([
     {
       command: "resource-names",
       args: ["--api-origin", "https://api.board.example.com"],
       keys: [],
+      cwd,
     },
-    { command: "storage", args: [], keys: ["STORAGE_ADAPTER"] },
+    { command: "storage", args: [], keys: ["STORAGE_ADAPTER"], cwd },
     {
       command: "storage",
       args: [],
       keys: ["STORAGE_ADAPTER", "STORAGE_BUCKET"],
+      cwd,
     },
-    { command: "validate", args: ["celld"], keys: ["CLERK_SECRET_KEY"] },
+    { command: "validate", args: ["celld"], keys: ["CLERK_SECRET_KEY"], cwd },
   ])
 })
 
 test("a refused setting carries the app's reason; a broken entrypoint names itself", () => {
-  const source = fakeSource(temporary())
-  const app = sourceSettings(source)
+  const release = fakeRelease(temporary())
+  const app = sourceSettings(release)
   expect(() =>
     app.validate("cloudflare", { FIXTURE_REFUSE: "secret-value" })
   ).toThrow(new SettingsRefused("FIXTURE_REFUSE must be unset."))
   writeFileSync(
-    join(source.path, "scripts/self-host/settings.ts"),
+    installer(release, "settings"),
     "process.stdout.write('not json')\n"
   )
   expect(() => app.resourcePrefix("https://api.board.example.com")).toThrow(
     "unexpected resource names"
   )
   writeFileSync(
-    join(source.path, "scripts/self-host/settings.ts"),
-    "throw new Error('broken checkout')\n"
+    installer(release, "settings"),
+    "throw new Error('broken release')\n"
   )
-  expect(() => app.validate("cloudflare", {})).toThrow(SourceError)
-  expect(() => app.validate("cloudflare", {})).toThrow("broken checkout")
+  expect(() => app.validate("cloudflare", {})).toThrow(ReleaseError)
+  expect(() => app.validate("cloudflare", {})).toThrow("broken release")
 })

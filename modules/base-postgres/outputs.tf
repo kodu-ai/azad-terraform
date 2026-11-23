@@ -40,3 +40,8 @@ output "deploy" {
   description = "The handoff `cloudflare.ts deploy` gives the app's installer, without its revision and database URL; null without a deployment."
   value       = module.installation.installer_input
 }
+
+output "miniapps" {
+  description = "The loader provider's Mini Apps domain, its zone, wildcard record and certificate pack; null without one."
+  value       = length(module.miniapp_domain) == 0 ? null : module.miniapp_domain[0].miniapps
+}

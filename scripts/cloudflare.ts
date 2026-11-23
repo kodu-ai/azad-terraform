@@ -41,39 +41,37 @@ import {
   finishOwnWrite,
 } from "./own-backend"
 import {
-  assertMoved,
   backendEnvironment,
   cloudflareStore,
   configureBackend,
   installStore,
-  localState,
-  moveLocalState,
   readBackendRecord,
   withOperation,
   type TerraformRun,
 } from "./state"
 import {
-  requireSource,
+  installer,
+  ReleaseError,
+  releaseOption,
+  requireRelease,
   SettingsRefused,
-  sourceOption,
   sourceSettings,
-  SourceError,
   type AppSettings,
-  type Source,
+  type Release,
 } from "./source"
 
 /**
  * Cloudflare installation (Workers, Pages, Hyperdrive) of one customer
  * instance, with Neon or other PostgreSQL (`--root postgres`) or Cloud SQL
- * (`--root cloudsql`, the default), deployed from an Azad app source
- * checkout (`--source`, see ./source.ts):
+ * (`--root cloudsql`, the default), deployed from an unpacked Azad release
+ * (`--release`, see ./source.ts):
  *
  *   bun scripts/cloudflare.ts setup --database-provider postgres \
  *     --web-host board.example.com --credentials PRIVATE_ENV \
- *     --root postgres --source APP_CHECKOUT --instance-dir DIR
+ *     --root postgres --release RELEASE_DIR --instance-dir DIR
  *   bun scripts/cloudflare.ts init|output|show|state ... --root ROOT --instance-dir DIR
- *   bun scripts/cloudflare.ts refresh|plan|apply|destroy ... --root ROOT \
- *     --source APP_CHECKOUT --instance-dir DIR
+ *   bun scripts/cloudflare.ts refresh|plan|apply|destroy|deploy ... --root ROOT \
+ *     --release RELEASE_DIR --instance-dir DIR
  *
  * Every per-install file is in the instance directory (see ./instance.ts):
  * the private settings (`DIR/.env`), and the root's state, variables, saved
@@ -92,6 +90,7 @@ const inputSchema = z.object({
   databaseProvider: z.enum(["cloudsql", "postgres"]).optional(),
   webHost: z.string().regex(/^[a-z0-9]+([.-][a-z0-9]+)+$/u),
   revision: z.string().regex(/^[a-f0-9]{40}$/u),
+  version: z.string().min(1),
   credentials: z.string().min(1),
   accountId: z
     .string()
@@ -99,6 +98,8 @@ const inputSchema = z.object({
     .optional(),
   runnerCidr: z.string().optional(),
   httpProxyConfigured: z.boolean().optional(),
+  /** `--miniapps-domain`: the loader provider's Mini Apps domain, or `none`. */
+  miniappsDomain: z.string().min(1),
 })
 const credentialsSchema = z.object({
   CLOUDFLARE_API_TOKEN: z.string().min(1),
@@ -404,6 +405,119 @@ export function setupStorage(env: Record<string, string>, app: AppSettings) {
   }
 }
 
+const domainSchema = z
+  .string()
+  .regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/u)
+
+/**
+ * `--miniapps-domain` as a lowercase domain, or undefined for `none`.
+ *
+ * @throws SetupError for a value that is not a domain name, or one that is,
+ *   contains or sits under a Board host: Mini App origins never share a host
+ *   with the API or web app.
+ */
+export function miniappsDomain(
+  value: string,
+  hosts: string[]
+): string | undefined {
+  const domain = value.trim().toLowerCase().replace(/\.$/u, "")
+  if (domain === "none") return undefined
+  if (!domainSchema.safeParse(domain).success)
+    throw new SetupError(
+      "--miniapps-domain takes a domain name such as apps.example.com, or none."
+    )
+  for (const host of hosts)
+    if (
+      host === domain ||
+      host.endsWith(`.${domain}`) ||
+      domain.endsWith(`.${host}`)
+    )
+      throw new SetupError(
+        `--miniapps-domain ${domain} must be apart from the API and web hosts: not one of them, above one or below one.`
+      )
+  return domain
+}
+
+/** The loader provider's Mini Apps domain and the zone of the account that holds it. */
+export type MiniappsZone = {
+  domain: string
+  zone: { id: string; name: string }
+  /** True below the zone's apex: Terraform orders an advanced certificate pack. */
+  certificate: boolean
+}
+
+/**
+ * Finds the zone of the account that holds the Mini Apps domain (the longest
+ * matching zone name), with the deployment token. Below the zone's apex the
+ * hosts need an advanced certificate, so the zone must have Advanced
+ * Certificate Manager; the wildcard record Terraform creates must not exist
+ * yet.
+ *
+ * @throws SetupError when no readable zone holds the domain, the zone lacks
+ *   Advanced Certificate Manager, or DNS already has a `*.<domain>` record.
+ */
+export async function miniappsZone(
+  fetcher: Fetcher,
+  token: string,
+  accountId: string,
+  domain: string
+): Promise<MiniappsZone> {
+  const zone = await cloudflareZone(fetcher, token, accountId, domain)
+  if (!zone)
+    throw new SetupError(
+      `${domain} is not in a Cloudflare zone of this account that CLOUDFLARE_API_TOKEN can read. Add the zone, or give the token Zone Read, DNS Edit and Workers Routes Edit on it, then rerun setup.`
+    )
+  const certificate = zone.name !== domain
+  if (certificate) {
+    let response: Response
+    try {
+      response = await fetcher(
+        `${cloudflareApi}/zones/${zone.id}/ssl/certificate_packs/quota`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          redirect: "error",
+          signal: AbortSignal.timeout(30_000),
+        }
+      )
+    } catch {
+      throw new SetupError(
+        "Setup could not reach api.cloudflare.com. Check network/proxy settings and retry."
+      )
+    }
+    if (response.status === 401 || response.status === 403)
+      throw new SetupError(
+        `CLOUDFLARE_API_TOKEN may not read the certificates of ${zone.name}. Mini Apps on ${domain}, below the zone's apex, need an advanced certificate: give the token SSL and Certificates Edit on ${zone.name}.`
+      )
+    const quota = z
+      .object({
+        success: z.literal(true),
+        result: z.object({
+          advanced: z.object({ allocated: z.number() }).nullish(),
+        }),
+      })
+      .safeParse(await response.json().catch(() => undefined))
+    if (!response.ok || !quota.success)
+      throw new SetupError(
+        `Setup could not read the certificate quota of ${zone.name} (HTTP ${response.status}). Check service availability and access permissions.`
+      )
+    if (!(quota.data.result.advanced?.allocated ?? 0))
+      throw new SetupError(
+        `${domain} is below the apex of the zone ${zone.name}, so its Mini App hosts need an advanced certificate for *.${domain}, which needs Advanced Certificate Manager on ${zone.name}. Turn it on in the Cloudflare dashboard (SSL/TLS, Edge Certificates), or use a domain that is a zone of its own.`
+      )
+  }
+  const existing = await cloudflareGet(
+    fetcher,
+    token,
+    `/zones/${zone.id}/dns_records?name=${encodeURIComponent(`*.${domain}`)}`,
+    z.array(z.object({ type: z.string() }))
+  )
+  if (existing.length)
+    throw new SetupError(
+      `DNS already has a record for *.${domain}. Terraform creates a proxied AAAA 100:: record there for the Mini Apps; remove the existing one, then rerun setup.`
+    )
+  return { domain, zone, certificate }
+}
+
 /** Reads account/app metadata and public network information, without provisioning.
  * Returns a non-secret Terraform configuration plus the private settings
  * setup derives (`additions`), and the credential file with them appended
@@ -424,6 +538,12 @@ export async function prepareCloudflare(
       "An HTTP proxy is configured. Supply --runner-cidr for direct PostgreSQL TCP egress; an HTTP trace would identify the proxy instead."
     )
   }
+  const apiOrigin = `https://api.${input.webHost}`
+  const webOrigin = `https://${input.webHost}`
+  const domain = miniappsDomain(input.miniappsDomain, [
+    input.webHost,
+    `api.${input.webHost}`,
+  ])
   const env = parse(input.credentials)
   if (usePostgres && !env.DATABASE_URL?.trim())
     throw new SetupError(
@@ -433,6 +553,11 @@ export async function prepareCloudflare(
   if (!credentials.success)
     throw new SetupError(
       "Complete the seven fields in credentials.env.example before setup."
+    )
+  const storage = setupStorage(env, appSettings)
+  if (domain && storage)
+    throw new SetupError(
+      "Mini Apps on the loader provider keep their releases and databases in this installation's R2 files bucket, so --miniapps-domain needs STORAGE_ADAPTER=r2 (the default). With your own bucket, pass --miniapps-domain none."
     )
   let accountId = input.accountId
   if (!accountId) {
@@ -539,15 +664,30 @@ export async function prepareCloudflare(
     !env.V3_CONTROL_BACKUP?.trim()
   )
     additions.set("V3_CONTROL_BACKUP", "none")
-  if (env.V3_CF_API_TOKEN?.trim())
-    additions.set("AZAD_SELF_HOST_MINIAPPS", "enabled")
-  else additions.set("AZAD_SELF_HOST_MINIAPPS", "disabled")
+  // Mini Apps run on the loader provider under --miniapps-domain. With none,
+  // a V3_CF_API_TOKEN keeps them as Workers with D1; without one they are off.
+  const miniapps =
+    domain &&
+    (await miniappsZone(
+      fetcher,
+      credentials.data.CLOUDFLARE_API_TOKEN,
+      accountId,
+      domain
+    ))
+  if (miniapps) {
+    additions.set("AZAD_SELF_HOST_MINIAPPS", "loader")
+    additions.set("AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN", miniapps.domain)
+  } else {
+    additions.set(
+      "AZAD_SELF_HOST_MINIAPPS",
+      env.V3_CF_API_TOKEN?.trim() ? "enabled" : "disabled"
+    )
+    if (env.AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN?.trim())
+      additions.set("AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN", "")
+  }
   // Original dotenv quoting/PEM newlines stay intact. Derived additions contain
   // only API-validated identifiers, hex randomness, and fixed literals.
   const installerEnv = `${input.credentials.trim()}\n${[...additions].map(([key, value]) => `${key}=${value}`).join("\n")}\n`
-  const apiOrigin = `https://api.${input.webHost}`
-  const webOrigin = `https://${input.webHost}`
-  const storage = setupStorage(env, appSettings)
   const zones = await hostZones(
     fetcher,
     credentials.data.CLOUDFLARE_API_TOKEN,
@@ -574,6 +714,7 @@ export async function prepareCloudflare(
     additions: Object.fromEntries(additions),
     generatedWebhook: !env.GITHUB_WEBHOOK_SECRET?.trim(),
     clerkDns: clerk,
+    miniapps: miniapps || undefined,
     tfvars: {
       gcp: usePostgres
         ? undefined
@@ -586,7 +727,7 @@ export async function prepareCloudflare(
         api_origin: apiOrigin,
         web_origin: webOrigin,
       },
-      deployment: { revision: input.revision },
+      deployment: { revision: input.revision, version: input.version },
       storage,
       github_app_pending: githubAppPending || undefined,
       host_zones: zones,
@@ -619,7 +760,7 @@ export function saveCloudflare(
 ) {
   if (existsSync(files.vars))
     throw new SetupError(
-      `${files.vars} already exists. Edit it in place, or use refresh after changing the source checkout.`
+      `${files.vars} already exists. Edit it in place, or use refresh to move to another release.`
     )
   const inPlace = resolve(credentials) === files.settings
   if (!inPlace && existsSync(files.settings))
@@ -658,6 +799,7 @@ const varsSchema = z.looseObject({
   deployment: z.looseObject({
     env_file: z.string(),
     revision: z.string(),
+    version: z.string().optional(),
     state_directory: z.string(),
   }),
 })
@@ -687,10 +829,10 @@ const TERRAFORM_COMMANDS = [
 ]
 /**
  * Commands that deploy, uninstall or validate the app, or hold the
- * installation's operation record (through the app's install-store.ts):
- * they need its source checkout.
+ * installation's operation record (through the release's install-store.js):
+ * they need the release.
  */
-const SOURCE_COMMANDS = new Set([
+const RELEASE_COMMANDS = new Set([
   "setup",
   "refresh",
   "plan",
@@ -700,13 +842,13 @@ const SOURCE_COMMANDS = new Set([
   "backup-keys",
   "import",
 ])
-/** Commands that evaluate the configuration: they pass a source checkout on when given one. */
-const OPTIONAL_SOURCE_COMMANDS = new Set(["validate", "console"])
-const USAGE = `Usage: cloudflare.ts setup --database-provider cloudsql|postgres [--project-id ID] --web-host board.example.com --credentials PRIVATE_ENV [--account-id ID] [--runner-cidr CIDR] [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR
-       cloudflare.ts refresh|plan|apply|destroy|deploy|import [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR [--take-over OPERATION] [terraform arguments]
-       cloudflare.ts backup-keys --out NEW_DIR [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR
+/** Commands that evaluate the configuration: they pass a release on when given one. */
+const OPTIONAL_RELEASE_COMMANDS = new Set(["validate", "console"])
+const USAGE = `Usage: cloudflare.ts setup --database-provider cloudsql|postgres [--project-id ID] --web-host board.example.com --miniapps-domain DOMAIN|none --credentials PRIVATE_ENV [--account-id ID] [--runner-cidr CIDR] [--root cloudsql|postgres] --release RELEASE_DIR --instance-dir DIR
+       cloudflare.ts refresh|plan|apply|destroy|deploy|import [--root cloudsql|postgres] --release RELEASE_DIR --instance-dir DIR [--take-over OPERATION] [terraform arguments]
+       cloudflare.ts backup-keys --out NEW_DIR [--root cloudsql|postgres] --release RELEASE_DIR --instance-dir DIR
        cloudflare.ts init|output|show|state|validate|console|force-unlock [--root cloudsql|postgres] --instance-dir DIR [terraform arguments]
---source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init while it moves a 0.0.x local state.`
+--release names an unpacked Azad release and may instead come from AZAD_RELEASE. state mv|rm|push also needs it, and so does init with a backend_override.tf.`
 
 /** Arguments that print the usage instead of running a command. */
 export const HELP = new Set(["--help", "-h", "help"])
@@ -723,11 +865,12 @@ async function main() {
       "database-provider": { type: "string" },
       "project-id": { type: "string" },
       "web-host": { type: "string" },
+      "miniapps-domain": { type: "string" },
       credentials: { type: "string" },
       "account-id": { type: "string" },
       "runner-cidr": { type: "string" },
       root: { type: "string", default: "cloudsql" },
-      source: { type: "string" },
+      release: { type: "string" },
       "instance-dir": { type: "string" },
       "take-over": { type: "string" },
       out: { type: "string" },
@@ -740,11 +883,12 @@ async function main() {
       "database-provider": z.enum(["cloudsql", "postgres"]).optional(),
       "project-id": z.string().optional(),
       "web-host": z.string().optional(),
+      "miniapps-domain": z.string().optional(),
       credentials: z.string().optional(),
       "account-id": z.string().optional(),
       "runner-cidr": z.string().optional(),
       root: z.string().default("cloudsql"),
-      source: z.string().optional(),
+      release: z.string().optional(),
       "instance-dir": z.string().optional(),
       "take-over": z.string().optional(),
       out: z.string().optional(),
@@ -769,17 +913,16 @@ async function main() {
     rootNamed(options.root, ROOT_NAMES)
   )
   assertBackend(files)
-  // The source is checked before anything is read from the network or written.
-  // init needs it only to move a local state or point the bucket at the
-  // installation's own backend, under the operation record.
-  const source: Source | undefined =
-    SOURCE_COMMANDS.has(command) ||
+  // The release is checked before anything is read from the network or
+  // written. init needs it only to point the bucket at the installation's own
+  // backend, under the operation record.
+  const release: Release | undefined =
+    RELEASE_COMMANDS.has(command) ||
     changingPhase(command, forwardedArgs(args)) !== undefined ||
-    (command === "init" &&
-      (localState(files) !== undefined || existsSync(ownBackendFile(files)))) ||
-    (OPTIONAL_SOURCE_COMMANDS.has(command) &&
-      sourceOption(options.source) !== undefined)
-      ? requireSource(options.source)
+    (command === "init" && existsSync(ownBackendFile(files))) ||
+    (OPTIONAL_RELEASE_COMMANDS.has(command) &&
+      releaseOption(options.release) !== undefined)
+      ? requireRelease(options.release)
       : undefined
   const commandLine = (name: string) =>
     `${DRIVER} ${name} --root ${files.name} --instance-dir ${files.instance}`
@@ -788,9 +931,13 @@ async function main() {
       !options.credentials ||
       !options["web-host"] ||
       !options["database-provider"] ||
-      !source
+      !release
     )
       throw new SetupError(USAGE)
+    if (!options["miniapps-domain"])
+      throw new SetupError(
+        `setup needs --miniapps-domain: the domain Mini Apps serve under (a zone of this account, or a subdomain inside one, such as apps.example.com), or none.\n${USAGE}`
+      )
     if (existsSync(files.vars))
       throw new SetupError(
         `${files.vars} already exists. Edit it in place or use refresh.`
@@ -804,8 +951,10 @@ async function main() {
         projectId: options["project-id"],
         databaseProvider: options["database-provider"],
         webHost: options["web-host"],
+        miniappsDomain: options["miniapps-domain"],
         credentials: readFileSync(options.credentials, "utf8"),
-        revision: source.revision,
+        revision: release.revision,
+        version: release.version,
         accountId: options["account-id"],
         runnerCidr: options["runner-cidr"],
         httpProxyConfigured: [
@@ -817,7 +966,7 @@ async function main() {
           "all_proxy",
         ].some((key) => Boolean(process.env[key]?.trim())),
       },
-      sourceSettings(source)
+      sourceSettings(release)
     )
     saveCloudflare(files, result, options.credentials)
     const lines = [
@@ -845,6 +994,16 @@ async function main() {
       lines.push(
         "Set the generated GITHUB_WEBHOOK_SECRET from the private file in GitHub App settings before apply."
       )
+    if (result.miniapps)
+      lines.push(
+        `Mini Apps run on https://<app>.${result.miniapps.domain}. Terraform adds a proxied wildcard record *.${result.miniapps.domain} in the zone ${result.miniapps.zone.name}${result.miniapps.certificate ? `, and an advanced certificate for ${result.miniapps.domain} and *.${result.miniapps.domain}` : ""}. To change the domain, edit AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN in ${files.settings}, then plan, apply and deploy.`
+      )
+    else
+      lines.push(
+        result.additions.AZAD_SELF_HOST_MINIAPPS === "enabled"
+          ? "Mini Apps run as Workers with D1 through V3_CF_API_TOKEN (AZAD_SELF_HOST_MINIAPPS=enabled)."
+          : "Mini Apps are off (AZAD_SELF_HOST_MINIAPPS=disabled)."
+      )
     if (result.tfvars.storage)
       lines.push(
         `Files and Agent Connect releases go to your ${result.tfvars.storage.adapter} bucket ${result.tfvars.storage.bucket}; no R2 bucket is created.`
@@ -852,15 +1011,21 @@ async function main() {
     process.stdout.write(`${lines.join("\n")}\n`)
     return
   }
-  if (command === "refresh" && source) {
+  if (command === "refresh" && release) {
     cloudflareVars(files)
     const vars = z
-      .looseObject({ deployment: z.looseObject({ revision: z.string() }) })
+      .looseObject({
+        deployment: z.looseObject({
+          revision: z.string(),
+          version: z.string().optional(),
+        }),
+      })
       .parse(JSON.parse(readFileSync(files.vars, "utf8")))
-    vars.deployment.revision = source.revision
+    vars.deployment.revision = release.revision
+    vars.deployment.version = release.version
     writePrivate(files.vars, `${JSON.stringify(vars, null, 2)}\n`)
     process.stdout.write(
-      `Updated deployment.revision to ${source.revision} (${source.path}); customer settings and credentials are unchanged.\n`
+      `Updated deployment to release ${release.version} (${release.revision}, ${release.path}); customer settings and credentials are unchanged.\n`
     )
     return
   }
@@ -898,13 +1063,15 @@ async function main() {
             ...process.env,
             CLOUDFLARE_API_TOKEN: token,
             TF_VAR_database_url: env.DATABASE_URL ?? "",
+            // The .env is the one place the Mini Apps domain is set.
+            TF_VAR_miniapp_base_domain: loaderDomain(env),
             TF_VAR_database_ca_pem:
               config.database_ca &&
               ["plan", "apply", "destroy"].includes(terraformArgs[0] ?? "")
                 ? neonCaPem()
                 : "",
-            ...(source
-              ? { TF_VAR_source_dir: source.path, AZAD_SOURCE: source.path }
+            ...(release
+              ? { TF_VAR_release_dir: release.path, AZAD_RELEASE: release.path }
               : {}),
             TF_DATA_DIR: where.data,
             ...(!bucket
@@ -932,8 +1099,8 @@ async function main() {
     own: terraform,
   }
   const app =
-    source &&
-    installStore(source, {
+    release &&
+    installStore(release, {
       store,
       kind: "cloudflare",
       env_file: config.deployment.env_file,
@@ -954,26 +1121,10 @@ async function main() {
       })
       return
     }
-    let status = terraform([
+    const status = terraform([
       "init",
       ...terraformArguments("init", forwardedRaw, files),
     ]).status
-    if (status === 0 && app && localState(files)) {
-      let kept: string | undefined
-      status = withOperation(
-        app,
-        "terraform-state-move",
-        { takeOver: options["take-over"] },
-        () => {
-          kept = moveLocalState(files, terraform)
-          return 0
-        }
-      )
-      if (kept)
-        process.stdout.write(
-          `Moved this installation's Terraform state into the R2 bucket ${store.bucket}; the local copy is kept as ${kept}.\n`
-        )
-    }
     if (status === 0) assertStateHere(terraform, files, initCommand)
     process.exitCode = status
     return
@@ -993,8 +1144,6 @@ async function main() {
       assertStateHere(terraform, files, initCommand)
   }
   if (!own) assertInitialized(files, store.bucket, initCommand)
-  // force-unlock stays possible: a move that crashed may hold Terraform's lock.
-  if (command !== "force-unlock") assertMoved(files, initCommand)
   checkState()
   /** The full installer handoff: Terraform's outputs, the revision and the database URL. */
   const handoff = (lease: string) => {
@@ -1024,7 +1173,15 @@ async function main() {
     return
   }
   if (command === "deploy") {
-    if (!app || !source) throw new SetupError(USAGE)
+    if (!app || !release) throw new SetupError(USAGE)
+    assertDeploys(release, config.deployment.revision, commandLine("refresh"))
+    // The app routes the Mini Apps domain the .env names; its DNS record and
+    // certificate are Terraform's, so they must already be applied.
+    const applied = terraformOutputs(terraform).miniapps?.domain ?? ""
+    if (applied !== loaderDomain(env))
+      throw new SetupError(
+        `The Mini Apps domain in ${config.deployment.env_file} (${loaderDomain(env) || "none"}) differs from the one Terraform last applied (${applied || "none"}). Run plan and apply first, then deploy.`
+      )
     process.exitCode = withOperation(
       app,
       "deploy",
@@ -1037,11 +1194,11 @@ async function main() {
           [
             process.execPath,
             "--no-env-file",
-            join(source.path, "scripts/self-host/cloudflare-install.ts"),
+            installer(release, "cloudflare-install"),
             "install",
           ],
           {
-            cwd: source.path,
+            cwd: release.payload,
             env: {
               ...process.env,
               AZAD_TERRAFORM_INSTALL: JSON.stringify(input),
@@ -1103,10 +1260,48 @@ function terraformOutputs(terraform: TerraformRun) {
     .nullish()
     .parse(outputs.deploy?.value)
   const databaseUrl = z.string().nullish().parse(outputs.database_url?.value)
-  return { deploy, database_url: databaseUrl ?? undefined }
+  const miniapps = z
+    .looseObject({ domain: z.string() })
+    .nullish()
+    .parse(outputs.miniapps?.value)
+  return {
+    deploy,
+    database_url: databaseUrl ?? undefined,
+    miniapps: miniapps ?? undefined,
+  }
 }
 
-/** A lease the app's install-store.ts printed. */
+/**
+ * The Mini Apps domain Terraform serves (TF_VAR_miniapp_base_domain): the
+ * .env's AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN while AZAD_SELF_HOST_MINIAPPS is
+ * loader, empty otherwise.
+ */
+export function loaderDomain(env: Record<string, string>): string {
+  if (env.AZAD_SELF_HOST_MINIAPPS?.trim() !== "loader") return ""
+  return (env.AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/u, "")
+}
+
+/**
+ * Refuses a deploy from another release than the one the variables record:
+ * `refresh` moves the installation to a release, and `deploy` installs it.
+ *
+ * @throws SetupError naming both revisions and the refresh command.
+ */
+export function assertDeploys(
+  release: Release,
+  revision: string,
+  refresh: string
+): void {
+  if (release.revision !== revision)
+    throw new SetupError(
+      `${release.path} is release ${release.version} (${release.revision}), but this installation's deployment.revision is ${revision}. To deploy this release, run first:\n  ${refresh} --release ${release.path}`
+    )
+}
+
+/** A lease the release's install-store.js printed. */
 const leaseSchema = z.object({ id: z.string(), version: z.string() })
 
 if (import.meta.main) {
@@ -1114,7 +1309,7 @@ if (import.meta.main) {
     await main()
   } catch (error) {
     process.stderr.write(
-      `${error instanceof SetupError || error instanceof InstanceError || error instanceof SourceError ? error.message : "Cloudflare setup failed. Check input files, credential formats and external metadata; no credential values are logged."}\n`
+      `${error instanceof SetupError || error instanceof InstanceError || error instanceof ReleaseError ? error.message : "Cloudflare setup failed. Check input files, credential formats and external metadata; no credential values are logged."}\n`
     )
     process.exitCode = 1
   }

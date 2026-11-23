@@ -18,8 +18,8 @@ override_resource {
 }
 
 variables {
-  # The Azad app source checkout; plans never run its entrypoints.
-  source_dir = "/opt/azad"
+  # The unpacked Azad release; plans never run its entrypoints.
+  release_dir = "/opt/azad-release"
   gcp = {
     project_id    = "customer-project-id"
     instance_name = "customer-azad-postgres"
@@ -126,5 +126,20 @@ run "minimal_generated_configuration" {
   assert {
     condition     = output.database.instance == "azad-7ec551c78fb7"
     error_message = "Omitting the SQL name must derive it from the API origin."
+  }
+}
+
+run "the_loader_domain_gets_a_wildcard_in_its_own_zone" {
+  command = plan
+  variables {
+    miniapp_base_domain = "example-apps.com"
+  }
+  override_module {
+    target  = module.base.module.miniapp_domain[0].module.zone
+    outputs = { zone = { id = "22222222222222222222222222222222", name = "example-apps.com" } }
+  }
+  assert {
+    condition     = output.miniapps.zone_id == "22222222222222222222222222222222" && output.miniapps.certificate_pack == null
+    error_message = "A zone apex needs no certificate pack: Universal SSL covers its first-level subdomains."
   }
 }

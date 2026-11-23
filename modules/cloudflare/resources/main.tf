@@ -1,6 +1,6 @@
 locals {
-  # Matches resourceNames in the Azad app's scripts/self-host/install.ts. The
-  # app's cloudflare-install.ts checks the names against that function before
+  # Matches the app installer's resourceNames. The release's
+  # cloudflare-install.js checks the names against that function before
   # allowing a deployment.
   host_slug       = replace(trimprefix(var.api_origin, "https://"), "/[^a-z0-9]+/", "-")
   resource_prefix = "${trimsuffix(substr("azad-${local.host_slug}", 0, 30), "-")}-${substr(sha256(var.api_origin), 0, 8)}"
