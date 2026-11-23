@@ -212,7 +212,9 @@ token that can create tokens.
   (`roles/cloudsql.admin`, `roles/serviceusage.serviceUsageAdmin`). A user
   ADC's quota project also needs `serviceusage.services.use` (Service Usage
   Consumer).
-- **`gcp-celld`:** Owner, or Editor plus Project IAM Admin. Terraform turns on
+- **`gcp-celld`:** Owner, or Editor plus Project IAM Admin, Kubernetes Engine
+  Admin (Editor cannot create the cluster's RBAC roles) and Secret Manager
+  Secret Accessor. Terraform turns on
   the Google APIs it uses (Compute, GKE, Cloud Storage, Cloud SQL Admin,
   Certificate Manager, Secret Manager, Backup for GKE). `init` creates the
   state bucket with the Cloud Storage API, which new projects have on.
