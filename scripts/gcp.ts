@@ -70,12 +70,9 @@ import {
   finishOwnWrite,
 } from "./own-backend"
 import {
-  assertMoved,
   configureBackend,
   gcpStore,
   installStore,
-  localState,
-  moveLocalState,
   readBackendRecord,
   withOperation,
   type TerraformRun,
@@ -308,7 +305,7 @@ const USAGE = `Usage: gcp.ts setup --credentials FILE --project-id ID --region R
        gcp.ts refresh|plan|apply|destroy|deploy --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld] [--take-over OPERATION] [terraform arguments]
        gcp.ts backup-keys --out NEW_DIR --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld]
        gcp.ts phase|init|output|show|state|force-unlock --instance-dir DIR [--root gcp-celld] [terraform arguments]
---source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init while it moves a 0.0.x local state.`
+--source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init with a backend_override.tf.`
 
 async function main() {
   const [command, ...args] = process.argv.slice(2)
@@ -379,13 +376,12 @@ async function main() {
   )
   assertBackend(files)
   // The source is checked before anything is read from the network or written.
-  // init needs it only to move a local state or point the bucket at the
-  // installation's own backend, under the operation record.
+  // init needs it only to point the bucket at the installation's own
+  // backend, under the operation record.
   const source =
     SOURCE_COMMANDS.has(command) ||
     changingPhase(command, forwardedArgs(args)) !== undefined ||
-    (command === "init" &&
-      (localState(files) !== undefined || existsSync(ownBackendFile(files))))
+    (command === "init" && existsSync(ownBackendFile(files)))
       ? requireSource(options.source)
       : undefined
   const commandLine = (name: string) =>
@@ -524,26 +520,10 @@ async function main() {
       })
       return
     }
-    let status = terraform([
+    const status = terraform([
       "init",
       ...terraformArguments("init", forwardedRaw, files),
     ]).status
-    if (status === 0 && app && localState(files)) {
-      let kept: string | undefined
-      status = withOperation(
-        app,
-        "terraform-state-move",
-        { takeOver: options["take-over"] },
-        () => {
-          kept = moveLocalState(files, terraform)
-          return 0
-        }
-      )
-      if (kept)
-        process.stdout.write(
-          `Moved this installation's Terraform state into the GCS bucket ${store.bucket}; the local copy is kept as ${kept}.\n`
-        )
-    }
     if (status === 0) assertStateHere(terraform, files, initCommand)
     process.exitCode = status
     return
@@ -564,8 +544,6 @@ async function main() {
       assertStateHere(terraform, files, initCommand)
   }
   if (!own) assertInitialized(files, store.bucket, initCommand)
-  // force-unlock stays possible: a move that crashed may hold Terraform's lock.
-  if (command !== "force-unlock") assertMoved(files, initCommand)
   checkState()
   /** The full installer handoff: Terraform's output, the revision and where state lives. */
   const handoff = (lease: string) => {
@@ -688,9 +666,7 @@ async function main() {
     command === "plan" ||
     (command === "apply" && !appliesSavedPlan(command, forwarded))
   // Until a deploy has recorded its receipt, the fleets may serve nothing, so
-  // DNS cannot wait for the load balancer's check. (An installation from
-  // azad 0.0.x gets its receipt into the store on its first apply here.)
-  // A direct apply before the cluster exists runs the full apply right after
+  // DNS cannot wait for the load balancer's check. A direct apply before the cluster exists runs the full apply right after
   // the cluster's, so the flag is set for both.
   if (plans && app) firstDeployPending = !app.deployed()
   process.exitCode = run(() => {

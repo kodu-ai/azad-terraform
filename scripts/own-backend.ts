@@ -29,8 +29,7 @@
  * left behind by a migration, another installation's state and an empty
  * backend are refused.
  *
- * `init` moves the bucket's state (or a local state of a release before
- * 0.1.0) into an empty backend: it pushes it, checks the bucket did not
+ * `init` moves the bucket's state into an empty backend: it pushes it, checks the bucket did not
  * change (the backend is not the bucket itself), reads it back and compares
  * it, keeps a copy in the instance directory, and only then writes the
  * pointer. A new installation's empty backend gets an empty state of its
@@ -44,7 +43,6 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  renameSync,
   rmSync,
   unlinkSync,
 } from "node:fs"
@@ -59,8 +57,7 @@ import {
 } from "./instance"
 import {
   contents,
-  localState,
-  localStateSchema,
+  stateSchema,
   withOperation,
   type installStore,
   type TerraformRun,
@@ -307,7 +304,7 @@ const pointerSchema = z.object({
 })
 export type StatePointer = z.infer<typeof pointerSchema>
 
-type State = z.infer<typeof localStateSchema>
+type State = z.infer<typeof stateSchema>
 
 /** What a backend's `state pull` holds. */
 export type BackendState =
@@ -327,7 +324,7 @@ export function readBackendState(
   if (pulled.status !== 0)
     throw new InstanceError(`Terraform could not read ${what}.`)
   if (!pulled.stdout.trim()) return { kind: "none" }
-  const state = localStateSchema.parse(JSON.parse(pulled.stdout))
+  const state = stateSchema.parse(JSON.parse(pulled.stdout))
   const output = z
     .object({ value: z.string() })
     .safeParse(state.outputs[POINTER_OUTPUT])
@@ -539,8 +536,8 @@ export type Reconciled =
  * both configurations.
  *
  * @throws InstanceError When the own backend is the bucket itself, does not
- *   hold the current state, holds another state than this installation's,
- *   or the bucket and a local state disagree; nothing is moved then.
+ *   hold the current state, or holds another state than this
+ *   installation's; nothing is moved then.
  */
 export function reconcileOwnBackend(
   files: InstanceTerraform,
@@ -557,7 +554,6 @@ export function reconcileOwnBackend(
   const backend = declaredBackend(files)
   const bucket = readBackendState(runs.bucket, "the state bucket")
   let own = readBackendState(runs.own, `the backend in ${file}`)
-  const local = localState(files)
   const now = options.now ?? new Date()
   const time = now.toISOString().replaceAll(/[:.]/gu, "-")
   const aliased = `The backend in ${file} is the state bucket's own state. Point it at another bucket, key or workspace.`
@@ -576,10 +572,6 @@ export function reconcileOwnBackend(
   }
 
   if (bucket.kind === "pointer") {
-    if (local)
-      throw new InstanceError(
-        `${files.state} holds a local state from a release before 0.1.0, but this installation's state already lives in its own backend. Check which one is current, then move the other out of the way.`
-      )
     const { pointer } = bucket
     if (!own.state || !holdsCurrent(pointer, own, files, options))
       throw new InstanceError(notCurrent(file, pointer))
@@ -593,15 +585,7 @@ export function reconcileOwnBackend(
     return { action: "record", kept: [] }
   }
 
-  if (
-    local &&
-    bucket.kind === "state" &&
-    contents(local) !== contents(bucket.state)
-  )
-    throw new InstanceError(
-      `${files.state} and the state bucket hold different states. Nothing was moved; check which one is current.`
-    )
-  const source = local ?? (bucket.kind === "state" ? bucket.state : undefined)
+  const source = bucket.kind === "state" ? bucket.state : undefined
   if (!source) {
     if (own.kind === "state")
       throw new InstanceError(
@@ -666,13 +650,6 @@ export function reconcileOwnBackend(
   if (bucket.kind === "state") {
     const copy = `${files.state}.before-own-backend-${time}`
     writePrivate(copy, `${JSON.stringify(bucket.state, null, 2)}\n`)
-    kept.push(copy)
-  }
-  if (local) {
-    const copy = `${files.state}.before-remote-${time}`
-    renameSync(files.state, copy)
-    if (existsSync(`${files.state}.backup`))
-      renameSync(`${files.state}.backup`, `${copy}.previous`)
     kept.push(copy)
   }
   pointAt(own.state)

@@ -343,13 +343,7 @@ test.skipIf(!terraformBinary)(
     const own = t.own(t.bucketPath)
     expect(() => reconcile(own)).toThrow("is the state bucket's own state")
     expect(t.read(t.bucketPath).resources).toEqual(liveState(LINEAGE).resources)
-    // The same with a local state to move, and with nothing yet.
-    const local = real()
-    writeFileSync(local.files.state, JSON.stringify(liveState(LINEAGE)))
-    expect(() => reconcile(local.own(local.bucketPath))).toThrow(
-      "is the state bucket's own state"
-    )
-    expect(existsSync(local.files.state)).toBe(true)
+    // The same with nothing yet.
     const fresh = real()
     expect(() => reconcile(fresh.own(fresh.bucketPath))).toThrow(
       "is the state bucket's own state"
@@ -625,16 +619,14 @@ test.skipIf(!terraformBinary)(
 )
 
 test.skipIf(!terraformBinary)(
-  "a state already moved with Terraform is recorded as it is, and a leftover local copy moves aside",
+  "a state already moved with Terraform is recorded as it is",
   () => {
     const t = real(liveState(LINEAGE))
-    writeFileSync(t.files.state, JSON.stringify(liveState(LINEAGE)))
     const ownPath = join(t.directory, "own.tfstate")
     writeFileSync(ownPath, JSON.stringify(liveState(LINEAGE)))
     const own = t.own(ownPath)
     const done = reconcile(own)
     expect(done.action).toBe("record")
-    expect(existsSync(t.files.state)).toBe(false)
     expect(t.read(ownPath).resources).toHaveLength(1)
     expect(pointerIn(t.read(t.bucketPath)).lineage).toBe(LINEAGE)
   }

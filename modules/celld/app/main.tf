@@ -21,12 +21,3 @@ locals {
     updater                   = var.updater
   }
 }
-
-# Releases before 0.1.0 deployed from here with a local-exec provisioner. The
-# installed app stays as it is; only Terraform's record of it goes.
-removed {
-  from = terraform_data.deploy
-  lifecycle {
-    destroy = false
-  }
-}

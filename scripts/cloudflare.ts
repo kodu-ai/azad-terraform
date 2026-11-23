@@ -41,13 +41,10 @@ import {
   finishOwnWrite,
 } from "./own-backend"
 import {
-  assertMoved,
   backendEnvironment,
   cloudflareStore,
   configureBackend,
   installStore,
-  localState,
-  moveLocalState,
   readBackendRecord,
   withOperation,
   type TerraformRun,
@@ -706,7 +703,7 @@ const USAGE = `Usage: cloudflare.ts setup --database-provider cloudsql|postgres 
        cloudflare.ts refresh|plan|apply|destroy|deploy|import [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR [--take-over OPERATION] [terraform arguments]
        cloudflare.ts backup-keys --out NEW_DIR [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR
        cloudflare.ts init|output|show|state|validate|console|force-unlock [--root cloudsql|postgres] --instance-dir DIR [terraform arguments]
---source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init while it moves a 0.0.x local state.`
+--source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init with a backend_override.tf.`
 
 /** Arguments that print the usage instead of running a command. */
 export const HELP = new Set(["--help", "-h", "help"])
@@ -770,13 +767,12 @@ async function main() {
   )
   assertBackend(files)
   // The source is checked before anything is read from the network or written.
-  // init needs it only to move a local state or point the bucket at the
-  // installation's own backend, under the operation record.
+  // init needs it only to point the bucket at the installation's own
+  // backend, under the operation record.
   const source: Source | undefined =
     SOURCE_COMMANDS.has(command) ||
     changingPhase(command, forwardedArgs(args)) !== undefined ||
-    (command === "init" &&
-      (localState(files) !== undefined || existsSync(ownBackendFile(files)))) ||
+    (command === "init" && existsSync(ownBackendFile(files))) ||
     (OPTIONAL_SOURCE_COMMANDS.has(command) &&
       sourceOption(options.source) !== undefined)
       ? requireSource(options.source)
@@ -954,26 +950,10 @@ async function main() {
       })
       return
     }
-    let status = terraform([
+    const status = terraform([
       "init",
       ...terraformArguments("init", forwardedRaw, files),
     ]).status
-    if (status === 0 && app && localState(files)) {
-      let kept: string | undefined
-      status = withOperation(
-        app,
-        "terraform-state-move",
-        { takeOver: options["take-over"] },
-        () => {
-          kept = moveLocalState(files, terraform)
-          return 0
-        }
-      )
-      if (kept)
-        process.stdout.write(
-          `Moved this installation's Terraform state into the R2 bucket ${store.bucket}; the local copy is kept as ${kept}.\n`
-        )
-    }
     if (status === 0) assertStateHere(terraform, files, initCommand)
     process.exitCode = status
     return
@@ -993,8 +973,6 @@ async function main() {
       assertStateHere(terraform, files, initCommand)
   }
   if (!own) assertInitialized(files, store.bucket, initCommand)
-  // force-unlock stays possible: a move that crashed may hold Terraform's lock.
-  if (command !== "force-unlock") assertMoved(files, initCommand)
   checkState()
   /** The full installer handoff: Terraform's outputs, the revision and the database URL. */
   const handoff = (lease: string) => {

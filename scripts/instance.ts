@@ -12,8 +12,6 @@
  *     *.tfplan                              saved plans
  *     .terraform/                           Terraform's working data (TF_DATA_DIR)
  *     installer-state/, celld-install/      the deploy's cache of the keys and receipts
- *     terraform.tfstate.before-remote-*     the local state of a release before
- *                                           0.1.0, kept after init moved it
  *
  * The drivers (`cloudflare.ts`, `gcp.ts`) run every Terraform command in a
  * root of this repository (`roots/<root name>`) with this directory's
@@ -58,7 +56,7 @@ export type InstanceTerraform = {
   instance: string
   /** `<instance>/terraform/<root name>`. */
   directory: string
-  /** The local state of a release before 0.1.0, which `init` moves into the bucket. */
+  /** `terraform.tfstate` here: the name of the state copies `init` keeps. */
   state: string
   /** The backend configuration `init` passes (`-backend-config`). */
   backend: string
@@ -175,8 +173,7 @@ export function appliesSavedPlan(command: string, args: string[]): boolean {
 /**
  * Terraform arguments for one command against the instance. `init`
  * configures the backend at the installation's bucket (`-reconfigure`:
- * Terraform never copies state from a backend it recorded earlier; the
- * drivers move a local state themselves). Commands that read variables get
+ * Terraform never copies state from a backend it recorded earlier). Commands that read variables get
  * the instance's tfvars, except an apply of a saved plan. A relative plan
  * path (`-out=NAME`, `apply NAME`, `show NAME`) is in the instance's
  * Terraform directory.
@@ -225,7 +222,7 @@ const STATE_WRITERS = new Set(["mv", "rm", "push", "replace-provider"])
 /**
  * The phase a command journals in the install-wide operation record, or
  * undefined for a command that changes nothing (plan, output, show, the
- * state readers). `init` takes none: the state it moves is this machine's.
+ * state readers). `init` takes none of its own.
  */
 export function changingPhase(
   command: string,
@@ -265,9 +262,8 @@ export const ROOT_BACKENDS: Record<RootName, "s3" | "gcs"> = {
 
 /**
  * Refuses a command until `init` has pointed the instance's working data at
- * the installation's bucket. A working directory initialized for the local
- * backend of a release before 0.1.0, or for another bucket, would otherwise
- * plan against the wrong state.
+ * the installation's bucket. A working directory initialized for another
+ * backend or bucket would otherwise plan against the wrong state.
  */
 export function assertInitialized(
   files: InstanceTerraform,

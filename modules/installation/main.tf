@@ -31,17 +31,9 @@ locals {
   }
 }
 
-# Terraform no longer deploys the app: `cloudflare.ts deploy` runs the app's
-# scripts/self-host/cloudflare-install.ts with this module's handoff, outside
-# any plan, so changing a setting can never put the source's revision over a
-# newer release. Releases before 0.1.0 deployed from a provisioner here; the
-# installed app stays as it is, only Terraform's record of it goes.
-removed {
-  from = terraform_data.install
-  lifecycle {
-    destroy = false
-  }
-}
+# Terraform never deploys the app: `cloudflare.ts deploy` runs the app's
+# installer with this module's handoff, outside any plan, so changing a
+# setting can never put an older release over a newer one.
 
 # Makes `terraform destroy` a complete uninstall. Destroyed before the R2
 # buckets, queue, CA and Clerk DNS it depends on, its provisioner removes what

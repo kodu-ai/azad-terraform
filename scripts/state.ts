@@ -18,15 +18,15 @@
  * deploy's state directory.
  *
  * Every command that changes the installation (apply, destroy, import, the
- * state commands that write, deploy, and init when it moves a local state)
- * holds the install-wide operation record while it runs, through the app
+ * state commands that write, deploy, and init when it points the bucket at
+ * an own backend) holds the install-wide operation record while it runs, through the app
  * checkout's `scripts/self-host/install-store.ts`, so it never overlaps a
  * release update from the console or another machine. A record another run
  * holds is taken over only with `--take-over <operation id>`, once the
  * operator confirmed that run and every process it started have stopped.
  */
 import { createHash } from "node:crypto"
-import { copyFileSync, existsSync, readFileSync, renameSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { hostname } from "node:os"
 import { join } from "node:path"
 import { z } from "zod"
@@ -390,109 +390,21 @@ export async function configureBackend(
 }
 
 /** The parts of a Terraform state the drivers compare. */
-export const localStateSchema = z.looseObject({
+export const stateSchema = z.looseObject({
   lineage: z.string(),
   resources: z.array(z.json()).default([]),
   outputs: z.record(z.string(), z.json()).default({}),
 })
 
-/** What a state records about the installation; a move keeps it exactly (Terraform gives the moved state a new lineage). */
-export const contents = (state: z.infer<typeof localStateSchema>) =>
+/** What a state records about the installation; a move keeps it exactly (Terraform may give the moved state a new lineage). */
+export const contents = (state: z.infer<typeof stateSchema>) =>
   JSON.stringify({ resources: state.resources, outputs: state.outputs })
-
-/**
- * The state a release before 0.1.0 kept in the instance directory, if it
- * holds anything: those releases used a local backend.
- */
-export function localState(files: InstanceTerraform) {
-  if (!existsSync(files.state)) return undefined
-  const text = readFileSync(files.state, "utf8")
-  if (!text.trim()) return undefined
-  const state = localStateSchema.parse(JSON.parse(text))
-  return state.resources.length ? state : undefined
-}
-
-/**
- * Refuses a command while the instance still holds the local state of a
- * release before 0.1.0: the bucket does not have it yet, so a plan would see
- * an empty installation.
- */
-export function assertMoved(files: InstanceTerraform, init: string): void {
-  if (localState(files))
-    throw new InstanceError(
-      `${files.state} still holds this installation's Terraform state from a release before 0.1.0; it is not in the state bucket yet. Run:\n  ${init}`
-    )
-}
 
 /** Runs Terraform in the root; returns its exit status and captured stdout. */
 export type TerraformRun = (
   args: string[],
   options?: { capture?: boolean }
 ) => { status: number; stdout: string }
-
-/**
- * Moves the local state of an existing installation into its bucket,
- * keeping the local file: it is pushed with Terraform into the empty
- * bucket, read back and compared (its resources and outputs), and only then
- * renamed out of the way, where no release reads it as current. A bucket that already
- * holds exactly this state (an interrupted move) is accepted; one that holds
- * any other state is never written. Run after `init` configured the remote
- * backend, holding the installation's operation record; until the local
- * file is renamed, the drivers refuse every other command
- * ({@link assertMoved}).
- *
- * @returns The copy kept beside the instance's other files, or undefined
- *   when there was nothing to move.
- * @throws InstanceError When the bucket holds a different state; the local
- *   state is left as it was.
- */
-export function moveLocalState(
-  files: InstanceTerraform,
-  terraform: TerraformRun,
-  now = new Date()
-): string | undefined {
-  const local = localState(files)
-  if (!local) return undefined
-  const kept = `${files.state}.before-remote-${now.toISOString().replaceAll(/[:.]/gu, "-")}`
-  const pull = () => {
-    const pulled = terraform(["state", "pull"], { capture: true })
-    if (pulled.status !== 0)
-      throw new InstanceError(
-        `Terraform could not read the state bucket; the local state in ${files.state} is unchanged.`
-      )
-    if (!pulled.stdout.trim()) return undefined
-    const state = localStateSchema.parse(JSON.parse(pulled.stdout))
-    // A backend without a state answers with an empty one, which GCS also
-    // gives a fresh lineage: nothing is recorded in it.
-    return state.resources.length || Object.keys(state.outputs).length
-      ? state
-      : undefined
-  }
-  const remote = pull()
-  if (remote && contents(remote) !== contents(local))
-    throw new InstanceError(
-      `The state bucket already holds a different state. Nothing was moved; the local state in ${files.state} is unchanged.`
-    )
-  // -force: the empty state Terraform created there has another lineage.
-  // The caller holds the installation's operation record, so nothing else
-  // writes the bucket's state meanwhile.
-  if (
-    !remote &&
-    terraform(["state", "push", "-force", files.state]).status !== 0
-  )
-    throw new InstanceError(
-      `Terraform did not move the local state into the bucket; ${files.state} is unchanged.`
-    )
-  const moved = pull()
-  if (!moved || contents(moved) !== contents(local))
-    throw new InstanceError(
-      `The state read back from the bucket differs from ${files.state}, which is unchanged. Inspect the bucket before you retry.`
-    )
-  renameSync(files.state, kept)
-  if (existsSync(`${files.state}.backup`))
-    renameSync(`${files.state}.backup`, `${kept}.previous`)
-  return kept
-}
 
 /** The app checkout's state entrypoint with this installation's handoff. */
 export function installStore(
