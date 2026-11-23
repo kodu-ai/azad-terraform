@@ -3,8 +3,8 @@
 The `gcp-celld` root runs Azad in your Google Cloud project on GKE Autopilot,
 with no Cloudflare runtime; Cloudflare only serves DNS for your domain.
 `scripts/gcp.ts` drives it. `apply` creates the infrastructure; `deploy` then
-runs the Azad source checkout's `scripts/self-host/celld-install.ts` with
-Terraform's handoff (see [how-it-works.md](how-it-works.md)). Terraform's
+runs the unpacked Azad release's `payload/installer/celld-install.js`, from
+its `payload/`, with Terraform's handoff (see [how-it-works.md](how-it-works.md)). Terraform's
 state and the app's install state live in the installation's GCS bucket, the
 keys in the project's Secret Manager.
 
@@ -43,8 +43,10 @@ Cloud SQL, Certificate Manager and Secret Manager APIs it needs.
 - Terraform 1.13.4+, Bun 1.4.4+, and the gcloud CLI signed in twice:
   `gcloud auth application-default login` for Terraform and the deploy, and
   `gcloud auth login`, which destroy uses.
-- An Azad source checkout with its dependencies installed (`--source` or
-  `AZAD_SOURCE`).
+- An unpacked Azad release (`--release` or `AZAD_RELEASE`): the `azad` CLI
+  downloads a signed one and verifies it. Its `payload/` holds the installer
+  entrypoints, and the deploy installs the release's own API bundle and web
+  build (`web/`).
 
 ## Install
 
@@ -66,7 +68,7 @@ GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
 Then:
 
 ```sh
-export AZAD_SOURCE=~/src/azad
+export AZAD_RELEASE=~/azad-release   # an unpacked Azad release
 instance=~/.azad/instances/default
 bun --no-env-file scripts/gcp.ts setup --credentials "$instance/.env" \
   --project-id my-project --region europe-west1 \
@@ -129,13 +131,14 @@ plan and apply:
 ## Update
 
 ```sh
-git -C "$AZAD_SOURCE" pull && bun install --frozen-lockfile --cwd "$AZAD_SOURCE"
-bun --no-env-file scripts/gcp.ts refresh --instance-dir "$instance"   # records the new HEAD
+export AZAD_RELEASE=~/azad-release-4.498.0   # the new release, unpacked
+bun --no-env-file scripts/gcp.ts refresh --instance-dir "$instance"   # records its sourceSha and version
 bun --no-env-file scripts/gcp.ts deploy  --instance-dir "$instance"
 ```
 
-The deploy waits until the API serves the new revision, and refuses a checkout
-older than the revision the installation runs. Terraform never deploys the
+The deploy refuses a release other than the one `refresh` recorded, waits
+until the API serves the new revision, and the release's installer refuses a
+release older than the one the installation runs. Terraform never deploys the
 app: run `plan` and `apply` only to change infrastructure, then `deploy`. To
 redeploy the same revision, deploy again.
 
@@ -202,7 +205,8 @@ bun --no-env-file scripts/gcp.ts destroy --instance-dir "$instance"
 ## Troubleshooting
 
 - **The deploy log** is `terraform/gcp-celld/celld-install/install.log` in the
-  instance directory; `deploy` prints the same lines.
+  instance directory; `deploy` prints the same lines as `celld-install.js`
+  writes them.
 - **The apply stops waiting for the load balancer:** the `A` records are left
   as they were. Check the certificate with `gcloud certificate-manager
   certificates describe <name>-tls --location=<region>` and the Gateway with

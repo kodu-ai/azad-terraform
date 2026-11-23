@@ -2,9 +2,11 @@
 
 Thanks for helping. This repository holds infrastructure only: Terraform roots
 and modules, and the Bun drivers that run them. Anything that knows about the
-Azad app belongs in the app's `scripts/self-host` entrypoints
-([`kodu-ai/azad-ide-web`](https://github.com/kodu-ai/azad-ide-web)), which the
-drivers and modules run as subprocesses; do not import app code here.
+Azad app belongs in the app's installer entrypoints, which every Azad release
+bundles as `payload/installer/*.js` and the drivers and modules run as
+subprocesses ([docs/how-it-works.md](docs/how-it-works.md#the-release-contract));
+do not import app code here. You need no app source to work on this
+repository.
 
 ## Setup
 
@@ -26,8 +28,9 @@ push to `main`; run them before opening a pull request:
 | Terraform: `fmt -check -recursive`, `init -backend=false` + `validate` for every root and module, and `terraform test` where tests exist | `scripts/check-terraform.sh` (or `scripts/check-terraform.sh roots/postgres` for one directory) |
 
 Every check is offline with respect to your accounts: the driver tests use fake
-HTTP boundaries, a stand-in `terraform` and a stand-in app checkout
-(`scripts/fixtures/source.ts`); Terraform tests use mocked providers and
+HTTP boundaries, a stand-in `terraform` and a stand-in unpacked release
+(`scripts/fixtures/source.ts`: a `release.json` and installer entrypoints
+that record how they were called); Terraform tests use mocked providers and
 plan-only runs. `check-terraform.sh` keeps Terraform's working data in a
 temporary directory and only downloads providers. Never point a check at a
 real instance directory.
@@ -50,10 +53,11 @@ real instance directory.
   changing a provider version, run
   `terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_amd64 -platform=darwin_arm64`
   in that directory.
-- **The app contract.** The entrypoints this repository runs, and how, are
-  listed in [docs/how-it-works.md](docs/how-it-works.md#the-app-contract). Changing that
-  contract needs a matching change in the app repository and a minor (0.x) or
-  major version.
+- **The release contract.** The release layout and the entrypoints this
+  repository runs, and how, are listed in
+  [docs/how-it-works.md](docs/how-it-works.md#the-release-contract). Changing
+  that contract needs a matching change in the app and a minor (0.x) or major
+  version.
 
 ## Releasing
 
