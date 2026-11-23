@@ -1,7 +1,7 @@
 /**
  * Small process and file helpers the drivers share. They hold no Azad app
- * knowledge; that stays in the app's own `scripts/self-host` entrypoints
- * (see ./source.ts).
+ * knowledge; that stays in the release's installer entrypoints (see
+ * ./source.ts).
  */
 import { randomUUID } from "node:crypto"
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"

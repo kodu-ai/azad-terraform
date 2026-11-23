@@ -18,8 +18,8 @@ override_resource {
 }
 
 variables {
-  # The Azad app source checkout; plans never run its entrypoints.
-  source_dir = "/opt/azad"
+  # The unpacked Azad release; plans never run its entrypoints.
+  release_dir = "/opt/azad-release"
   gcp = {
     project_id    = "customer-project-id"
     instance_name = "customer-azad-postgres"

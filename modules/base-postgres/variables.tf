@@ -26,7 +26,7 @@ variable "cloudflare" {
 }
 
 variable "deployment" {
-  description = "Installer handoff for `cloudflare.ts deploy`. The drivers write absolute paths in the instance directory, beside the source revision the deploy installs (deployment.revision, read by the driver only); a relative path is relative to the Terraform root directory. Set enabled=false for infrastructure only."
+  description = "Installer handoff for `cloudflare.ts deploy`. The drivers write absolute paths in the instance directory, beside the release the deploy installs (deployment.revision, its sourceSha, and deployment.version, read by the driver only); a relative path is relative to the Terraform root directory. Set enabled=false for infrastructure only."
   type = object({
     enabled         = optional(bool, true)
     env_file        = optional(string, ".env.self-host")
@@ -118,8 +118,8 @@ variable "host_zones" {
   nullable    = false
 }
 
-variable "source_dir" {
-  description = "Absolute path of the Azad app source checkout that uninstalls the app on destroy (see modules/installation)."
+variable "release_dir" {
+  description = "Absolute path of the unpacked Azad release that uninstalls the app on destroy (see modules/installation)."
   type        = string
   default     = null
 }

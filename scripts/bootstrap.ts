@@ -17,7 +17,7 @@ import { parse } from "dotenv"
 import { z } from "zod"
 import { REPOSITORY } from "./instance"
 import { isolatedProcessEnv, writePrivateJson } from "./lib"
-import { sourceOption } from "./source"
+import { ReleaseError, requireRelease } from "./source"
 
 /**
  * Creates an installation's scoped Cloudflare API tokens (roots/bootstrap)
@@ -25,11 +25,11 @@ import { sourceOption } from "./source"
  *
  *   bun scripts/bootstrap.ts plan|apply --config FILE \
  *     --bootstrap-file PRIVATE_ENV --state-dir PRIVATE_DIRECTORY \
- *     [--source APP_CHECKOUT]
+ *     --release RELEASE_DIR
  *
- * The configuration's `revision` must be the HEAD of the Azad app source
- * checkout the installation deploys: `--source`, else AZAD_SOURCE, else the
- * current directory. Nothing of the app runs here.
+ * The configuration's `revision` must be the `sourceSha` of the Azad
+ * release the installation deploys: `--release`, else AZAD_RELEASE.
+ * Nothing of the app runs here.
  */
 
 class BootstrapError extends Error {
@@ -474,7 +474,7 @@ async function reconcile(
   }
   await verifyValues(deps, values)
 }
-/** Same installation and source; managed project source may be added, never removed. */
+/** Same installation and release revision; managed project source may be added, never removed. */
 function checkConfig(receipt: Receipt, config: BootstrapConfig) {
   const comparable = (value: BootstrapConfig) =>
     JSON.stringify({
@@ -488,7 +488,7 @@ function checkConfig(receipt: Receipt, config: BootstrapConfig) {
     (receipt.config.managedSource === true && config.managedSource !== true)
   )
     throw new BootstrapError(
-      "Bootstrap configuration/source differs from its saved receipt. Resume with the original selected source and configuration."
+      "Bootstrap configuration (account, hostnames, features or release revision) differs from its saved receipt. Resume with the original configuration and release."
     )
 }
 
@@ -588,7 +588,7 @@ export async function applyBootstrap(
         )
     } else if (existsSync(state))
       throw new BootstrapError(
-        "Bootstrap state exists without its source/instance receipt. Restore both files together."
+        "Bootstrap state exists without its installation receipt. Restore both files together."
       )
     let values = readValues(state)
     await reconcile(deps, bootstrapToken, config, values)
@@ -753,7 +753,7 @@ export async function applyBootstrap(
 }
 
 const USAGE =
-  "Usage: bootstrap.ts plan|apply --config FILE --bootstrap-file PRIVATE_ENV --state-dir PRIVATE_DIRECTORY [--source APP_CHECKOUT]\n--source may instead come from AZAD_SOURCE; without either it is the current directory."
+  "Usage: bootstrap.ts plan|apply --config FILE --bootstrap-file PRIVATE_ENV --state-dir PRIVATE_DIRECTORY --release RELEASE_DIR\n--release names an unpacked Azad release and may instead come from AZAD_RELEASE."
 
 function cliArguments() {
   try {
@@ -762,7 +762,7 @@ function cliArguments() {
         config: { type: "string" },
         "bootstrap-file": { type: "string" },
         "state-dir": { type: "string" },
-        source: { type: "string" },
+        release: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
       allowPositionals: true,
@@ -795,17 +795,10 @@ async function main() {
     .object({ CLOUDFLARE_BOOTSTRAP_API_TOKEN: z.string().trim().min(1) })
     .strict()
     .parse(parse(privateFile(values["bootstrap-file"])))
-  const source = resolve(sourceOption(values.source) ?? ".")
-  const head = await dependencies
-    .run(["git", "-C", source, "rev-parse", "HEAD"], isolatedProcessEnv())
-    .catch(() => {
-      throw new BootstrapError(
-        `${source} is not a Git checkout of the Azad app source. Pass it with --source or AZAD_SOURCE.`
-      )
-    })
-  if (head.trim() !== config.revision)
+  const release = requireRelease(values.release)
+  if (release.revision !== config.revision)
     throw new BootstrapError(
-      "Selected source revision differs from checkout HEAD."
+      `The configuration's revision differs from the sourceSha of the release ${release.path} (${release.version}).`
     )
   const token = env.CLOUDFLARE_BOOTSTRAP_API_TOKEN
   const result =
@@ -821,7 +814,7 @@ if (import.meta.main) {
     await main()
   } catch (error) {
     process.stderr.write(
-      `${error instanceof BootstrapError ? error.message : "Token bootstrap failed. Check private input formats, token-management authority and preserved state; credential details are not logged."}\n`
+      `${error instanceof BootstrapError || error instanceof ReleaseError ? error.message : "Token bootstrap failed. Check private input formats, token-management authority and preserved state; credential details are not logged."}\n`
     )
     process.exitCode = 1
   }

@@ -1,5 +1,5 @@
 # The deploy runs outside Terraform with this module's handoff; the uninstall
-# runs the app's own entrypoint from its source checkout. Plan-only: no
+# runs the app's own entrypoint from the unpacked release. Plan-only: no
 # provisioner runs.
 variables {
   cloudflare = {
@@ -18,14 +18,14 @@ variables {
   }
 }
 
-run "the_uninstall_records_the_source_it_was_applied_from" {
+run "the_uninstall_records_the_release_it_was_applied_from" {
   command = plan
   variables {
-    source_dir = "/opt/azad"
+    release_dir = "/opt/azad-release"
   }
   assert {
-    condition     = terraform_data.uninstall[0].input.source_dir == "/opt/azad"
-    error_message = "A destroy must find the checkout that deployed the app."
+    condition     = terraform_data.uninstall[0].input.release_dir == "/opt/azad-release"
+    error_message = "A destroy must find the release that deployed the app."
   }
   assert {
     condition     = !strcontains(terraform_data.uninstall[0].input.target, "fixture@")
@@ -45,7 +45,7 @@ run "the_deploy_handoff_names_the_installation_without_credentials" {
   }
 }
 
-run "infrastructure_only_needs_no_source" {
+run "infrastructure_only_needs_no_release" {
   command = plan
   variables {
     deployment = {

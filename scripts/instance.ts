@@ -1,7 +1,7 @@
 /**
  * One installation's Terraform files live in its instance directory, never in
- * this repository or the app's source checkout, so any copy of the same
- * release drives it. Terraform's state and the app's install state live in
+ * this repository or the app's release, so any copy of the same release of
+ * this repository drives it. Terraform's state and the app's install state live in
  * the installation's own bucket (see ./state.ts); this directory holds the
  * settings, the variables and a cache:
  *
@@ -201,7 +201,7 @@ export function terraformArguments(
 const DRIVER_OPTIONS = [
   "--root",
   "--instance-dir",
-  "--source",
+  "--release",
   "--take-over",
   "--out",
 ]

@@ -1,24 +1,24 @@
 /**
  * Google Cloud installation (celld on GKE Autopilot) with the `gcp-celld`
- * root, deployed from an Azad app source checkout (`--source`, see
+ * root, deployed from an unpacked Azad release (`--release`, see
  * ./source.ts):
  *
  *   bun scripts/gcp.ts setup --credentials DIR/.env \
  *     --project-id ID --region REGION --web-host board.example.com \
  *     --account-id CLOUDFLARE_ACCOUNT [--evaluation] \
- *     --source APP_CHECKOUT --instance-dir DIR
+ *     --release RELEASE_DIR --instance-dir DIR
  *   bun scripts/gcp.ts init --instance-dir DIR
- *   bun scripts/gcp.ts plan -out=NAME.tfplan --source APP_CHECKOUT --instance-dir DIR
- *   bun scripts/gcp.ts apply NAME.tfplan --source APP_CHECKOUT --instance-dir DIR
- *   bun scripts/gcp.ts deploy --source APP_CHECKOUT --instance-dir DIR
- *   bun scripts/gcp.ts refresh | destroy ... --source APP_CHECKOUT --instance-dir DIR
+ *   bun scripts/gcp.ts plan -out=NAME.tfplan --release RELEASE_DIR --instance-dir DIR
+ *   bun scripts/gcp.ts apply NAME.tfplan --release RELEASE_DIR --instance-dir DIR
+ *   bun scripts/gcp.ts deploy --release RELEASE_DIR --instance-dir DIR
+ *   bun scripts/gcp.ts refresh | destroy ... --release RELEASE_DIR --instance-dir DIR
  *   bun scripts/gcp.ts phase | output | show | state ... --instance-dir DIR
  *
  * `setup` reads the hostname's Cloudflare zone and Clerk's production CNAMEs
  * with the private credential file and writes the instance's
  * terraform.tfvars.json once. The credentials stay in that file: Terraform
  * gets CLOUDFLARE_API_TOKEN from it, and the deploy (`deploy`, which runs
- * the app's celld-install.ts with module.app's handoff) reads it directly,
+ * the release's celld-install.js with module.app's handoff) reads it directly,
  * so none of them enters Terraform state (the secrets Terraform generates,
  * such as the database password, do). Google access is Application Default
  * Credentials. Terraform's state lives in the installation's GCS bucket
@@ -41,7 +41,13 @@ import {
 import { join, resolve } from "node:path"
 import { parseArgs } from "node:util"
 import { z } from "zod"
-import { clerkDns, HELP, hostZones, SetupError } from "./cloudflare"
+import {
+  assertDeploys,
+  clerkDns,
+  HELP,
+  hostZones,
+  SetupError,
+} from "./cloudflare"
 import {
   appliesSavedPlan,
   assertBackend,
@@ -78,12 +84,12 @@ import {
   type TerraformRun,
 } from "./state"
 import {
-  requireSource,
+  installer,
+  ReleaseError,
+  requireRelease,
   SettingsRefused,
   sourceSettings,
-  SourceError,
   type AppSettings,
-  type Source,
 } from "./source"
 
 const ROOT_NAMES = ["gcp-celld"] as const
@@ -125,6 +131,7 @@ const inputSchema = z.object({
   webHost: z.string().regex(/^[a-z0-9]+([.-][a-z0-9]+)+$/u),
   accountId: z.string().regex(/^[a-f0-9]{32}$/u),
   revision: z.string().regex(/^[a-f0-9]{40}$/u),
+  version: z.string().min(1),
   credentialsPath: z.string().min(1),
   evaluation: z.boolean(),
   /** Scheduled Backup for GKE snapshots of the app's disks (Forgejo's repositories). */
@@ -140,6 +147,7 @@ const varsSchema = z.looseObject({
   web_host: z.string(),
   deployment: z.looseObject({
     revision: z.string(),
+    version: z.string().optional(),
     env_file: z.string(),
     state_directory: z.string(),
   }),
@@ -152,7 +160,12 @@ type GcpVariables = {
   name: string
   web_host: string
   cloudflare_zone_id: string
-  deployment: { revision: string; env_file: string; state_directory?: string }
+  deployment: {
+    revision: string
+    version: string
+    env_file: string
+    state_directory?: string
+  }
   clerk_dns?: { zone_id: string; records: Record<string, string> }
   spot?: boolean
   deletion_protection?: boolean
@@ -225,6 +238,7 @@ export async function prepareGcp(
     cloudflare_zone_id: zones[input.webHost],
     deployment: {
       revision: input.revision,
+      version: input.version,
       env_file: resolve(input.credentialsPath),
     },
     clerk_dns:
@@ -289,10 +303,10 @@ const TERRAFORM_COMMANDS = [
 ]
 /**
  * Commands that deploy or validate the app, or hold the installation's
- * operation record (through the app's install-store.ts): they need its
- * source checkout.
+ * operation record (through the release's install-store.js): they need the
+ * release.
  */
-const SOURCE_COMMANDS = new Set([
+const RELEASE_COMMANDS = new Set([
   "setup",
   "refresh",
   "plan",
@@ -301,11 +315,11 @@ const SOURCE_COMMANDS = new Set([
   "deploy",
   "backup-keys",
 ])
-const USAGE = `Usage: gcp.ts setup --credentials FILE --project-id ID --region REGION --web-host HOST --account-id ID [--evaluation] [--disk-backups hourly|daily|weekly|off] [--agent-machine TYPE|none] --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld]
-       gcp.ts refresh|plan|apply|destroy|deploy --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld] [--take-over OPERATION] [terraform arguments]
-       gcp.ts backup-keys --out NEW_DIR --source APP_CHECKOUT --instance-dir DIR [--root gcp-celld]
+const USAGE = `Usage: gcp.ts setup --credentials FILE --project-id ID --region REGION --web-host HOST --account-id ID [--evaluation] [--disk-backups hourly|daily|weekly|off] [--agent-machine TYPE|none] --release RELEASE_DIR --instance-dir DIR [--root gcp-celld]
+       gcp.ts refresh|plan|apply|destroy|deploy --release RELEASE_DIR --instance-dir DIR [--root gcp-celld] [--take-over OPERATION] [terraform arguments]
+       gcp.ts backup-keys --out NEW_DIR --release RELEASE_DIR --instance-dir DIR [--root gcp-celld]
        gcp.ts phase|init|output|show|state|force-unlock --instance-dir DIR [--root gcp-celld] [terraform arguments]
---source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init with a backend_override.tf.`
+--release names an unpacked Azad release and may instead come from AZAD_RELEASE. state mv|rm|push also needs it, and so does init with a backend_override.tf.`
 
 async function main() {
   const [command, ...args] = process.argv.slice(2)
@@ -325,7 +339,7 @@ async function main() {
       "disk-backups": { type: "string", default: "daily" },
       "agent-machine": { type: "string", default: "none" },
       root: { type: "string", default: ROOT_NAMES[0] },
-      source: { type: "string" },
+      release: { type: "string" },
       "instance-dir": { type: "string" },
       "take-over": { type: "string" },
       out: { type: "string" },
@@ -348,7 +362,7 @@ async function main() {
         .default("daily"),
       "agent-machine": agentMachineSchema.default("none"),
       root: z.string().default(ROOT_NAMES[0]),
-      source: z.string().optional(),
+      release: z.string().optional(),
       "instance-dir": z.string().optional(),
       "take-over": z.string().optional(),
       out: z.string().optional(),
@@ -375,14 +389,14 @@ async function main() {
     rootNamed(options.root, ROOT_NAMES)
   )
   assertBackend(files)
-  // The source is checked before anything is read from the network or written.
-  // init needs it only to point the bucket at the installation's own
+  // The release is checked before anything is read from the network or
+  // written. init needs it only to point the bucket at the installation's own
   // backend, under the operation record.
-  const source =
-    SOURCE_COMMANDS.has(command) ||
+  const release =
+    RELEASE_COMMANDS.has(command) ||
     changingPhase(command, forwardedArgs(args)) !== undefined ||
     (command === "init" && existsSync(ownBackendFile(files)))
-      ? requireSource(options.source)
+      ? requireRelease(options.release)
       : undefined
   const commandLine = (name: string) =>
     `${DRIVER} ${name} --instance-dir ${files.instance}`
@@ -393,12 +407,12 @@ async function main() {
       !options.region ||
       !options["web-host"] ||
       !options["account-id"] ||
-      !source
+      !release
     )
       throw new SetupError(USAGE)
     if (existsSync(files.vars))
       throw new SetupError(
-        `${files.vars} already exists. Edit it in place, or use refresh after changing the source checkout.`
+        `${files.vars} already exists. Edit it in place, or use refresh to move to another release.`
       )
     const result = await prepareGcp(
       {
@@ -406,13 +420,14 @@ async function main() {
         region: options.region,
         webHost: options["web-host"],
         accountId: options["account-id"],
-        revision: source.revision,
+        revision: release.revision,
+        version: release.version,
         credentialsPath: options.credentials,
         evaluation: options.evaluation,
         diskBackups: options["disk-backups"],
         agentMachine: options["agent-machine"],
       },
-      sourceSettings(source)
+      sourceSettings(release)
     )
     const tfvars: GcpVariables = {
       ...result.tfvars,
@@ -444,12 +459,13 @@ async function main() {
     process.stdout.write(`${lines.join("\n")}\n`)
     return
   }
-  if (command === "refresh" && source) {
+  if (command === "refresh" && release) {
     const vars = readVars(files)
-    vars.deployment.revision = source.revision
+    vars.deployment.revision = release.revision
+    vars.deployment.version = release.version
     writePrivate(files.vars, `${JSON.stringify(vars, null, 2)}\n`)
     process.stdout.write(
-      `Updated deployment.revision to ${source.revision} (${source.path}).\n`
+      `Updated deployment to release ${release.version} (${release.revision}, ${release.path}).\n`
     )
     return
   }
@@ -498,8 +514,8 @@ async function main() {
     own: terraform,
   }
   const app =
-    source &&
-    installStore(source, {
+    release &&
+    installStore(release, {
       store,
       kind: "celld",
       env_file: vars.deployment.env_file,
@@ -574,7 +590,8 @@ async function main() {
     return
   }
   if (command === "deploy") {
-    if (!app || !source) throw new SetupError(USAGE)
+    if (!app || !release) throw new SetupError(USAGE)
+    assertDeploys(release, vars.deployment.revision, commandLine("refresh"))
     process.exitCode = withOperation(
       app,
       "deploy",
@@ -590,13 +607,14 @@ async function main() {
             "-o",
             "pipefail",
             "-c",
-            'umask 077 && mkdir -p "$AZAD_CELLD_STATE" && "$BUN" --no-env-file scripts/self-host/celld-install.ts 2>&1 | tee -a "$AZAD_CELLD_STATE/install.log"',
+            'umask 077 && mkdir -p "$AZAD_CELLD_STATE" && "$BUN" --no-env-file "$AZAD_CELLD_ENTRY" 2>&1 | tee -a "$AZAD_CELLD_STATE/install.log"',
           ],
           {
-            cwd: source.path,
+            cwd: release.payload,
             env: {
               ...process.env,
               BUN: process.execPath,
+              AZAD_CELLD_ENTRY: installer(release, "celld-install"),
               AZAD_CELLD_STATE: vars.deployment.state_directory,
               AZAD_CELLD_INSTALL: JSON.stringify(input),
             },
@@ -708,7 +726,7 @@ if (import.meta.main) {
     await main()
   } catch (error) {
     process.stderr.write(
-      `${error instanceof SetupError || error instanceof InstanceError || error instanceof SourceError ? error.message : "Google Cloud setup failed. Check the input files and credential formats; no credential values are logged."}\n`
+      `${error instanceof SetupError || error instanceof InstanceError || error instanceof ReleaseError ? error.message : "Google Cloud setup failed. Check the input files and credential formats; no credential values are logged."}\n`
     )
     process.exitCode = 1
   }

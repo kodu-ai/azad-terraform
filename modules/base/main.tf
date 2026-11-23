@@ -33,7 +33,7 @@ module "installation" {
   updater_image   = var.updater_image
   cloudflare      = var.cloudflare
   deployment      = var.deployment
-  source_dir      = var.source_dir
+  release_dir     = var.release_dir
   resource_prefix = module.cloudflare.resource_prefix
   resources       = module.cloudflare.resources
   storage         = var.storage

@@ -5,7 +5,7 @@ module "base" {
   database_password  = var.database_password
   cloudflare         = var.cloudflare
   deployment         = var.deployment
-  source_dir         = var.source_dir
+  release_dir        = var.release_dir
   storage            = var.storage
   github_app_pending = var.github_app_pending
   host_zones         = var.host_zones

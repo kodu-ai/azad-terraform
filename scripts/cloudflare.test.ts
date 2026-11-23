@@ -13,7 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { parse } from "dotenv"
 import { clerkDns, prepareCloudflare, saveCloudflare } from "./cloudflare"
-import { fakeSource } from "./fixtures/source"
+import { fakeRelease } from "./fixtures/source"
 import {
   instanceTerraform,
   REPOSITORY,
@@ -47,6 +47,7 @@ const input = {
   projectId: "customer-project-id",
   webHost: "board.example.com",
   revision: "a".repeat(40),
+  version: "4.496.0",
   credentials,
 }
 const directories: string[] = []
@@ -74,7 +75,7 @@ const app: AppSettings = {
   validate: () => undefined,
 }
 
-/** An instance directory, a credential file and an app source checkout, side by side in a temporary directory. */
+/** An instance directory, a credential file and an unpacked release, side by side in a temporary directory. */
 function layout(prefix: string, root: "postgres" | "cloudsql" = "postgres") {
   const directory = mkdtempSync(join(tmpdir(), prefix))
   directories.push(directory)
@@ -85,7 +86,7 @@ function layout(prefix: string, root: "postgres" | "cloudsql" = "postgres") {
     root,
     rootDirectory: join(REPOSITORY, "roots", root),
     credentialsFile,
-    source: fakeSource(directory),
+    release: fakeRelease(directory),
     files: instanceTerraform(join(directory, "instance"), root),
   }
 }
@@ -117,9 +118,19 @@ function initialized(files: InstanceTerraform) {
   )
 }
 
-/** Each call the fake app's install-store.ts got. */
-function stateCalls(source: { path: string }) {
-  const path = join(source.path, "state-calls.jsonl")
+/** Each call the fake release's install-store.js got. */
+function stateCalls(release: { path: string }) {
+  const path = join(release.path, "state-calls.jsonl")
+  if (!existsSync(path)) return []
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
+
+/** Each run of the fake release's install entrypoints. */
+function installCalls(release: { path: string }) {
+  const path = join(release.path, "install-calls.jsonl")
   if (!existsSync(path)) return []
   return readFileSync(path, "utf8")
     .split("\n")
@@ -230,7 +241,7 @@ test("turns project, hostname and seven credentials into a minimal customer conf
       api_origin: "https://api.board.example.com",
       web_origin: "https://board.example.com",
     },
-    deployment: { revision: "a".repeat(40) },
+    deployment: { revision: "a".repeat(40), version: "4.496.0" },
     // Both Board hosts are reserved from zone-wide Worker routes.
     host_zones: {
       "board.example.com": "2".repeat(32),
@@ -329,6 +340,7 @@ test("writes the private settings and variables into the instance once, with ins
   expect(readFileSync(f.files.settings, "utf8")).toBe(result.installerEnv)
   expect(JSON.parse(readFileSync(f.files.vars, "utf8")).deployment).toEqual({
     revision: input.revision,
+    version: input.version,
     env_file: f.files.settings,
     state_directory: join(f.files.directory, "installer-state"),
   })
@@ -386,8 +398,8 @@ test("with a backend_override.tf, commands run in the installation's copy of the
         "plan",
         "--root",
         f.root,
-        "--source",
-        f.source.path,
+        "--release",
+        f.release.path,
         "--instance-dir",
         f.files.instance,
       ],
@@ -451,8 +463,8 @@ test("with a backend_override.tf, a command that changes the state records it in
       "x",
       "--root",
       f.root,
-      "--source",
-      f.source.path,
+      "--release",
+      f.release.path,
       "--instance-dir",
       f.files.instance,
     ],
@@ -474,7 +486,7 @@ test("with a backend_override.tf, a command that changes the state records it in
     serial: 4,
     writer: null,
   })
-  expect(stateCalls(f.source).map((call) => call.command)).toEqual([
+  expect(stateCalls(f.release).map((call) => call.command)).toEqual([
     "acquire",
     "finish",
   ])
@@ -496,8 +508,8 @@ test("a moved installation without its backend_override.tf refuses to plan again
         ...args,
         "--root",
         f.root,
-        "--source",
-        f.source.path,
+        "--release",
+        f.release.path,
         "--instance-dir",
         f.files.instance,
       ],
@@ -508,7 +520,7 @@ test("a moved installation without its backend_override.tf refuses to plan again
   expect(plan.stderr.toString()).toContain(
     "keeps Terraform's state in its own s3 backend (since 2026-11-05T21:00:00.000Z, from laptop)"
   )
-  expect(stateCalls(f.source)).toEqual([])
+  expect(stateCalls(f.release)).toEqual([])
   // A state pushed back into the bucket replaces the pointer.
   expect(run("state", "push", "-force", "moved.tfstate").exitCode).toBe(0)
   expect(terraform.calls().map((call) => call.args.slice(1, 3))).toEqual([
@@ -533,8 +545,8 @@ test("a check that passed before the operation record is taken is made again ins
       "apply",
       "--root",
       f.root,
-      "--source",
-      f.source.path,
+      "--release",
+      f.release.path,
       "--instance-dir",
       f.files.instance,
     ],
@@ -543,20 +555,20 @@ test("a check that passed before the operation record is taken is made again ins
   expect(apply.exitCode).toBe(1)
   expect(apply.stderr.toString()).toContain("holds only a pointer")
   expect(terraform.calls()).toEqual([])
-  expect(stateCalls(f.source).map((call) => call.command)).toEqual([
+  expect(stateCalls(f.release).map((call) => call.command)).toEqual([
     "acquire",
     "stop",
   ])
 })
 
-test("forwards a saved-plan command with the selected token, the instance's variables, working data and the source checkout", async () => {
+test("forwards a saved-plan command with the selected token, the instance's variables, working data and the release", async () => {
   const f = layout("terraform-cloudflare-command-")
   const result = await prepareCloudflare(input, app, boundary().fetcher)
   saveCloudflare(f.files, result, f.credentialsFile)
   initialized(f.files)
   const bin = echoTerraform(
     f.directory,
-    "const args = process.argv.slice(2); process.stdout.write(args[1] === 'output' ? '{}' : JSON.stringify({ args, token: process.env.CLOUDFLARE_API_TOKEN, data: process.env.TF_DATA_DIR, source: process.env.TF_VAR_source_dir, uninstallSource: process.env.AZAD_SOURCE, r2Key: process.env.AWS_ACCESS_KEY_ID, r2Secret: process.env.AWS_SECRET_ACCESS_KEY }))"
+    "const args = process.argv.slice(2); process.stdout.write(args[1] === 'output' ? '{}' : JSON.stringify({ args, token: process.env.CLOUDFLARE_API_TOKEN, data: process.env.TF_DATA_DIR, release: process.env.TF_VAR_release_dir, uninstallRelease: process.env.AZAD_RELEASE, r2Key: process.env.AWS_ACCESS_KEY_ID, r2Secret: process.env.AWS_SECRET_ACCESS_KEY }))"
   )
   const env = {
     PATH: `${bin}:${process.env.PATH}`,
@@ -568,8 +580,8 @@ test("forwards a saved-plan command with the selected token, the instance's vari
       "--root",
       f.root,
       "-out=terraform.tfplan",
-      "--source",
-      f.source.path,
+      "--release",
+      f.release.path,
       "--instance-dir",
       f.files.instance,
     ],
@@ -586,15 +598,15 @@ test("forwards a saved-plan command with the selected token, the instance's vari
     ],
     token: "fake-cf-token",
     data: f.files.data,
-    source: f.source.path,
-    uninstallSource: f.source.path,
+    release: f.release.path,
+    uninstallRelease: f.release.path,
     // R2's S3 keys for the state bucket: the token's id and its SHA-256.
     r2Key: "fixture-token-id",
     r2Secret: createHash("sha256").update("fake-cf-token").digest("hex"),
   })
   // A plan changes nothing, so it takes no operation record.
-  expect(stateCalls(f.source)).toEqual([])
-  // AZAD_SOURCE stands in for --source.
+  expect(stateCalls(f.release)).toEqual([])
+  // AZAD_RELEASE stands in for --release.
   const apply = driver(
     [
       "apply",
@@ -604,17 +616,17 @@ test("forwards a saved-plan command with the selected token, the instance's vari
       "--instance-dir",
       f.files.instance,
     ],
-    { ...env, AZAD_SOURCE: f.source.path }
+    { ...env, AZAD_RELEASE: f.release.path }
   )
   expect(JSON.parse(apply.stdout.toString()).args).toEqual([
     `-chdir=${f.rootDirectory}`,
     "apply",
     join(f.files.directory, "terraform.tfplan"),
   ])
-  expect(JSON.parse(apply.stdout.toString()).source).toBe(f.source.path)
+  expect(JSON.parse(apply.stdout.toString()).release).toBe(f.release.path)
   // The apply held the installation's operation record and released it; a
   // root without a deployment handoff publishes nothing.
-  const calls = stateCalls(f.source)
+  const calls = stateCalls(f.release)
   expect(calls.map((call) => call.command)).toEqual(["acquire", "finish"])
   expect(calls[0].args.slice(0, 2)).toEqual(["--phase", "terraform-apply"])
   expect(calls[0].state).toEqual({
@@ -625,14 +637,14 @@ test("forwards a saved-plan command with the selected token, the instance's vari
   })
 })
 
-test("commands that deploy or uninstall need a valid app source checkout; state readers do not", async () => {
+test("commands that deploy or uninstall need a valid release; state readers do not", async () => {
   const f = layout("terraform-cloudflare-source-")
   const result = await prepareCloudflare(input, app, boundary().fetcher)
   saveCloudflare(f.files, result, f.credentialsFile)
   initialized(f.files)
   const bin = echoTerraform(
     f.directory,
-    "process.stdout.write(JSON.stringify({ args: process.argv.slice(2), source: process.env.TF_VAR_source_dir ?? null }))"
+    "process.stdout.write(JSON.stringify({ args: process.argv.slice(2), release: process.env.TF_VAR_release_dir ?? null }))"
   )
   const env = { PATH: `${bin}:${process.env.PATH}` }
   const run = (command: string, ...extra: string[]) =>
@@ -643,28 +655,28 @@ test("commands that deploy or uninstall need a valid app source checkout; state 
   for (const command of ["plan", "apply", "destroy", "refresh"]) {
     const missing = run(command)
     expect(missing.exitCode).toBe(1)
-    expect(missing.stderr.toString()).toContain("--source is required")
+    expect(missing.stderr.toString()).toContain("--release is required")
     expect(missing.stdout.toString()).toBe("")
   }
-  const nowhere = run("plan", "--source", join(f.directory, "missing"))
+  const nowhere = run("plan", "--release", join(f.directory, "missing"))
   expect(nowhere.stderr.toString()).toContain("does not exist")
   const plain = join(f.directory, "plain")
   mkdirSync(plain)
-  expect(run("plan", "--source", plain).stderr.toString()).toContain(
-    "is not a Git checkout"
+  expect(run("plan", "--release", plain).stderr.toString()).toContain(
+    "has no release.json"
   )
-  rmSync(join(f.source.path, "scripts/self-host/celld-install.ts"))
-  expect(run("plan", "--source", f.source.path).stderr.toString()).toContain(
-    "lacks scripts/self-host/celld-install.ts"
+  rmSync(join(f.release.payload, "installer/celld-install.js"))
+  expect(run("plan", "--release", f.release.path).stderr.toString()).toContain(
+    "lacks payload/installer/celld-install.js"
   )
   for (const command of ["output", "show", "state"]) {
     const reader = run(command)
     expect(reader.exitCode).toBe(0)
-    expect(JSON.parse(reader.stdout.toString()).source).toBeNull()
+    expect(JSON.parse(reader.stdout.toString()).release).toBeNull()
   }
-  // A state command that writes holds the operation record, so it needs the source.
+  // A state command that writes holds the operation record, so it needs the release.
   expect(run("state", "rm", "module.x").stderr.toString()).toContain(
-    "--source is required"
+    "--release is required"
   )
 })
 
@@ -721,7 +733,7 @@ test("reports failed account lookups without echoing provider response bodies", 
   )
 })
 
-test("refresh binds the instance to the source checkout's HEAD and preserves credentials and overrides", async () => {
+test("refresh binds the instance to the release's sourceSha and version and preserves credentials and overrides", async () => {
   const f = layout("terraform-cloudflare-refresh-")
   const result = await prepareCloudflare(input, app, boundary().fetcher)
   saveCloudflare(f.files, result, f.credentialsFile)
@@ -739,8 +751,8 @@ test("refresh binds the instance to the source checkout's HEAD and preserves cre
       "refresh",
       "--root",
       f.root,
-      "--source",
-      f.source.path,
+      "--release",
+      f.release.path,
       "--instance-dir",
       f.files.instance,
     ],
@@ -748,8 +760,10 @@ test("refresh binds the instance to the source checkout's HEAD and preserves cre
   )
   expect(child.exitCode).toBe(0)
   const updated = JSON.parse(readFileSync(f.files.vars, "utf8"))
-  expect(updated.deployment.revision).toBe(f.source.revision)
+  expect(updated.deployment.revision).toBe(f.release.revision)
+  expect(updated.deployment.version).toBe(f.release.version)
   updated.deployment.revision = input.revision
+  updated.deployment.version = input.version
   expect(updated).toEqual(overridden)
   expect(readFileSync(f.files.settings, "utf8")).toBe(result.installerEnv)
 })
@@ -784,8 +798,8 @@ test("CLI detects proxy environment before network lookup or output writes", () 
       f.credentialsFile,
       "--root",
       f.root,
-      "--source",
-      f.source.path,
+      "--release",
+      f.release.path,
       "--instance-dir",
       f.files.instance,
     ],
@@ -808,8 +822,8 @@ test("CLI setup refuses a root that does not match the database provider", () =>
       input.webHost,
       "--credentials",
       f.credentialsFile,
-      "--source",
-      f.source.path,
+      "--release",
+      f.release.path,
       "--instance-dir",
       f.files.instance,
     ],
@@ -932,8 +946,8 @@ test("the actual Cloudflare runner supplies the OS-trusted public CA to a saved-
       "plan",
       "--root",
       f.root,
-      "--source",
-      f.source.path,
+      "--release",
+      f.release.path,
       "--instance-dir",
       f.files.instance,
       "-out=terraform.tfplan",
@@ -1137,9 +1151,13 @@ test("managed project source gets this installation's own Artifacts namespace", 
   expect(env.V3_CF_ACCOUNT_ID).toBe("0".repeat(32))
 })
 
-test("deploy hands the installer this machine's files, the recorded revision and the held lease", async () => {
+test("deploy runs the release's installer from its payload with this machine's files, the recorded revision and the held lease", async () => {
   const f = layout("terraform-cloudflare-deploy-")
-  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  const result = await prepareCloudflare(
+    { ...input, revision: f.release.revision, version: f.release.version },
+    app,
+    boundary().fetcher
+  )
   saveCloudflare(f.files, result, f.credentialsFile)
   initialized(f.files)
   // The last apply ran on another machine: its paths are in the output.
@@ -1161,8 +1179,8 @@ test("deploy hands the installer this machine's files, the recorded revision and
       "deploy",
       "--root",
       f.root,
-      "--source",
-      f.source.path,
+      "--release",
+      f.release.path,
       "--instance-dir",
       f.files.instance,
     ],
@@ -1170,21 +1188,61 @@ test("deploy hands the installer this machine's files, the recorded revision and
   )
   expect(deploy.stderr.toString()).toBe("")
   expect(deploy.exitCode).toBe(0)
-  const calls = stateCalls(f.source)
+  const calls = stateCalls(f.release)
   expect(calls.map((call) => call.command)).toEqual([
     "acquire",
     "publish",
     "finish",
   ])
   expect(calls[0].args).toEqual(
-    expect.arrayContaining(["--phase", "deploy", "--revision", "a".repeat(40)])
+    expect.arrayContaining([
+      "--phase",
+      "deploy",
+      "--revision",
+      f.release.revision,
+    ])
   )
-  expect(calls[1].stdin).toMatchObject({
+  expect(calls[0].cwd).toBe(f.release.payload)
+  const handoff = {
     env_file: f.files.settings,
     state_directory: join(f.files.directory, "installer-state"),
-    revision: "a".repeat(40),
+    revision: f.release.revision,
     install_store: fixtureStore,
     operation_id: "operation-fixture",
     operation_version: "1",
+  }
+  expect(calls[1].stdin).toMatchObject(handoff)
+  const installed = installCalls(f.release)
+  expect(installed).toHaveLength(1)
+  expect(installed[0]).toMatchObject({
+    entry: "cloudflare-install",
+    args: ["install"],
+    cwd: f.release.payload,
+    handoff,
   })
+  expect(deploy.stdout.toString()).toContain("cloudflare-install ran")
+
+  // Another release deploys only after refresh recorded it.
+  const other = fakeRelease(join(f.directory, "other"), {
+    version: "4.498.0",
+    revision: "e".repeat(40),
+  })
+  const refused = driver(
+    [
+      "deploy",
+      "--root",
+      f.root,
+      "--release",
+      other.path,
+      "--instance-dir",
+      f.files.instance,
+    ],
+    { PATH: `${bin}:${process.env.PATH}` }
+  )
+  expect(refused.exitCode).toBe(1)
+  expect(refused.stderr.toString()).toContain(
+    `is release 4.498.0 (${"e".repeat(40)}), but this installation's deployment.revision is ${f.release.revision}`
+  )
+  expect(refused.stderr.toString()).toContain("refresh --root postgres")
+  expect(stateCalls(other)).toEqual([])
 })

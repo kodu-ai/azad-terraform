@@ -19,9 +19,9 @@
  *
  * Every command that changes the installation (apply, destroy, import, the
  * state commands that write, deploy, and init when it points the bucket at
- * an own backend) holds the install-wide operation record while it runs, through the app
- * checkout's `scripts/self-host/install-store.ts`, so it never overlaps a
- * release update from the console or another machine. A record another run
+ * an own backend) holds the install-wide operation record while it runs,
+ * through the release's `payload/installer/install-store.js`, so it never
+ * overlaps a release update from the console or another machine. A record another run
  * holds is taken over only with `--take-over <operation id>`, once the
  * operator confirmed that run and every process it started have stopped.
  */
@@ -32,7 +32,7 @@ import { join } from "node:path"
 import { z } from "zod"
 import { InstanceError, writePrivate, type InstanceTerraform } from "./instance"
 import { isolatedProcessEnv, type Fetcher } from "./lib"
-import type { Source } from "./source"
+import { installer, type Release } from "./source"
 
 /** Where an installation's state lives, as the app's install store names it. */
 export type InstallStore =
@@ -406,9 +406,9 @@ export type TerraformRun = (
   options?: { capture?: boolean }
 ) => { status: number; stdout: string }
 
-/** The app checkout's state entrypoint with this installation's handoff. */
+/** The release's state entrypoint with this installation's handoff. */
 export function installStore(
-  source: Source,
+  release: Release,
   handoff: {
     store: InstallStore
     kind: "cloudflare" | "celld"
@@ -416,12 +416,12 @@ export function installStore(
     state_directory: string
   }
 ) {
-  const entry = join(source.path, "scripts/self-host/install-store.ts")
+  const entry = installer(release, "install-store")
   const run = (args: string[], stdin?: string) => {
     const result = Bun.spawnSync(
       [process.execPath, "--no-env-file", entry, ...args],
       {
-        cwd: source.path,
+        cwd: release.payload,
         env: {
           ...process.env,
           AZAD_INSTALL_STATE: JSON.stringify(handoff),
@@ -443,7 +443,7 @@ export function installStore(
   return {
     /**
      * Takes the install-wide operation record for `phase`, journaling the
-     * source revision a deploy installs; returns the lease.
+     * revision a deploy installs; returns the lease.
      */
     acquire(phase: string, takeOver?: string, revision?: string) {
       return run([

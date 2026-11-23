@@ -61,11 +61,11 @@ test("the drivers' own options never reach Terraform", () => {
       "-out=x.tfplan",
       "--root",
       "postgres",
-      "--source=/opt/azad",
+      "--release=/opt/azad-release",
       "--instance-dir",
       "/instance",
-      "--source",
-      "/opt/azad",
+      "--release",
+      "/opt/azad-release",
       "-input=false",
     ])
   ).toEqual(["-out=x.tfplan", "-input=false"])

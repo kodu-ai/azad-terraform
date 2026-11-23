@@ -20,6 +20,7 @@ import {
   type BootstrapConfig,
   type BootstrapDependencies,
 } from "./bootstrap"
+import { fakeRelease } from "./fixtures/source"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -462,6 +463,54 @@ test("CLI rejects a non-private bootstrap file without echoing credentials", asy
   expect(stderr).toContain("private files")
   expect(stderr).not.toContain("never-print-this-fixture")
   expect(f.remote.size).toBe(0)
+})
+
+test("CLI binds the configuration to the release's sourceSha before any request", () => {
+  const f = fixture()
+  const configFile = join(f.directory, "config.json")
+  const secretFile = join(f.directory, "bootstrap.env")
+  writeFileSync(configFile, JSON.stringify(config))
+  writeFileSync(
+    secretFile,
+    "CLOUDFLARE_BOOTSTRAP_API_TOKEN=never-print-this-fixture\n",
+    { mode: 0o600 }
+  )
+  const release = fakeRelease(f.directory, { revision: "d".repeat(40) })
+  const run = (env: Record<string, string>, ...extra: string[]) =>
+    Bun.spawnSync(
+      [
+        process.execPath,
+        "--no-env-file",
+        join(import.meta.dir, "bootstrap.ts"),
+        "plan",
+        "--config",
+        configFile,
+        "--bootstrap-file",
+        secretFile,
+        "--state-dir",
+        join(f.directory, "state"),
+        ...extra,
+      ],
+      {
+        env: { PATH: process.env.PATH, ...env },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    )
+  const missing = run({})
+  expect(missing.exitCode).toBe(1)
+  expect(missing.stderr.toString()).toContain("--release is required")
+  for (const child of [
+    run({}, "--release", release.path),
+    run({ AZAD_RELEASE: release.path }),
+  ]) {
+    expect(child.exitCode).toBe(1)
+    expect(child.stdout.toString()).toBe("")
+    expect(child.stderr.toString()).toContain(
+      `differs from the sourceSha of the release ${release.path} (4.497.0)`
+    )
+    expect(child.stderr.toString()).not.toContain("never-print-this-fixture")
+  }
 })
 
 test("CLI --help prints the usage; an unknown option gets the usage, not a generic failure", () => {

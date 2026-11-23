@@ -1,9 +1,9 @@
-# What `gcp.ts deploy` hands the app's scripts/self-host/celld-install.ts: the
-# fleets, origins, database and managed Git this configuration created.
+# What `gcp.ts deploy` hands the release's payload/installer/celld-install.js:
+# the fleets, origins, database and managed Git this configuration created.
 # Terraform no longer deploys the app itself. Instance keys, schema
 # migrations, the Agent Connect release mirror, bundle builds and `celld
 # deploy` run in the driver's deploy step, outside any plan, so changing a
-# setting can never put the source's revision over a newer release.
+# setting can never put an older release over a newer one.
 
 locals {
   state_directory = abspath(var.deployment.state_directory)

@@ -4,8 +4,8 @@ mock_provider "cloudflare" {
   }
 }
 variables {
-  # The Azad app source checkout; plans never run its entrypoints.
-  source_dir   = "/opt/azad"
+  # The unpacked Azad release; plans never run its entrypoints.
+  release_dir  = "/opt/azad-release"
   database_url = "postgresql://azad:a%40b%20c%2B%2F@ep-test.eu-central-1.aws.neon.tech:5432/azad?sslmode=verify-full"
   cloudflare = {
     account_id = "00000000000000000000000000000000"

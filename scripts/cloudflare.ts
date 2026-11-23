@@ -50,27 +50,28 @@ import {
   type TerraformRun,
 } from "./state"
 import {
-  requireSource,
+  installer,
+  ReleaseError,
+  releaseOption,
+  requireRelease,
   SettingsRefused,
-  sourceOption,
   sourceSettings,
-  SourceError,
   type AppSettings,
-  type Source,
+  type Release,
 } from "./source"
 
 /**
  * Cloudflare installation (Workers, Pages, Hyperdrive) of one customer
  * instance, with Neon or other PostgreSQL (`--root postgres`) or Cloud SQL
- * (`--root cloudsql`, the default), deployed from an Azad app source
- * checkout (`--source`, see ./source.ts):
+ * (`--root cloudsql`, the default), deployed from an unpacked Azad release
+ * (`--release`, see ./source.ts):
  *
  *   bun scripts/cloudflare.ts setup --database-provider postgres \
  *     --web-host board.example.com --credentials PRIVATE_ENV \
- *     --root postgres --source APP_CHECKOUT --instance-dir DIR
+ *     --root postgres --release RELEASE_DIR --instance-dir DIR
  *   bun scripts/cloudflare.ts init|output|show|state ... --root ROOT --instance-dir DIR
- *   bun scripts/cloudflare.ts refresh|plan|apply|destroy ... --root ROOT \
- *     --source APP_CHECKOUT --instance-dir DIR
+ *   bun scripts/cloudflare.ts refresh|plan|apply|destroy|deploy ... --root ROOT \
+ *     --release RELEASE_DIR --instance-dir DIR
  *
  * Every per-install file is in the instance directory (see ./instance.ts):
  * the private settings (`DIR/.env`), and the root's state, variables, saved
@@ -89,6 +90,7 @@ const inputSchema = z.object({
   databaseProvider: z.enum(["cloudsql", "postgres"]).optional(),
   webHost: z.string().regex(/^[a-z0-9]+([.-][a-z0-9]+)+$/u),
   revision: z.string().regex(/^[a-f0-9]{40}$/u),
+  version: z.string().min(1),
   credentials: z.string().min(1),
   accountId: z
     .string()
@@ -583,7 +585,7 @@ export async function prepareCloudflare(
         api_origin: apiOrigin,
         web_origin: webOrigin,
       },
-      deployment: { revision: input.revision },
+      deployment: { revision: input.revision, version: input.version },
       storage,
       github_app_pending: githubAppPending || undefined,
       host_zones: zones,
@@ -616,7 +618,7 @@ export function saveCloudflare(
 ) {
   if (existsSync(files.vars))
     throw new SetupError(
-      `${files.vars} already exists. Edit it in place, or use refresh after changing the source checkout.`
+      `${files.vars} already exists. Edit it in place, or use refresh to move to another release.`
     )
   const inPlace = resolve(credentials) === files.settings
   if (!inPlace && existsSync(files.settings))
@@ -655,6 +657,7 @@ const varsSchema = z.looseObject({
   deployment: z.looseObject({
     env_file: z.string(),
     revision: z.string(),
+    version: z.string().optional(),
     state_directory: z.string(),
   }),
 })
@@ -684,10 +687,10 @@ const TERRAFORM_COMMANDS = [
 ]
 /**
  * Commands that deploy, uninstall or validate the app, or hold the
- * installation's operation record (through the app's install-store.ts):
- * they need its source checkout.
+ * installation's operation record (through the release's install-store.js):
+ * they need the release.
  */
-const SOURCE_COMMANDS = new Set([
+const RELEASE_COMMANDS = new Set([
   "setup",
   "refresh",
   "plan",
@@ -697,13 +700,13 @@ const SOURCE_COMMANDS = new Set([
   "backup-keys",
   "import",
 ])
-/** Commands that evaluate the configuration: they pass a source checkout on when given one. */
-const OPTIONAL_SOURCE_COMMANDS = new Set(["validate", "console"])
-const USAGE = `Usage: cloudflare.ts setup --database-provider cloudsql|postgres [--project-id ID] --web-host board.example.com --credentials PRIVATE_ENV [--account-id ID] [--runner-cidr CIDR] [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR
-       cloudflare.ts refresh|plan|apply|destroy|deploy|import [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR [--take-over OPERATION] [terraform arguments]
-       cloudflare.ts backup-keys --out NEW_DIR [--root cloudsql|postgres] --source APP_CHECKOUT --instance-dir DIR
+/** Commands that evaluate the configuration: they pass a release on when given one. */
+const OPTIONAL_RELEASE_COMMANDS = new Set(["validate", "console"])
+const USAGE = `Usage: cloudflare.ts setup --database-provider cloudsql|postgres [--project-id ID] --web-host board.example.com --credentials PRIVATE_ENV [--account-id ID] [--runner-cidr CIDR] [--root cloudsql|postgres] --release RELEASE_DIR --instance-dir DIR
+       cloudflare.ts refresh|plan|apply|destroy|deploy|import [--root cloudsql|postgres] --release RELEASE_DIR --instance-dir DIR [--take-over OPERATION] [terraform arguments]
+       cloudflare.ts backup-keys --out NEW_DIR [--root cloudsql|postgres] --release RELEASE_DIR --instance-dir DIR
        cloudflare.ts init|output|show|state|validate|console|force-unlock [--root cloudsql|postgres] --instance-dir DIR [terraform arguments]
---source may instead come from AZAD_SOURCE. state mv|rm|push also needs it, and so does init with a backend_override.tf.`
+--release names an unpacked Azad release and may instead come from AZAD_RELEASE. state mv|rm|push also needs it, and so does init with a backend_override.tf.`
 
 /** Arguments that print the usage instead of running a command. */
 export const HELP = new Set(["--help", "-h", "help"])
@@ -724,7 +727,7 @@ async function main() {
       "account-id": { type: "string" },
       "runner-cidr": { type: "string" },
       root: { type: "string", default: "cloudsql" },
-      source: { type: "string" },
+      release: { type: "string" },
       "instance-dir": { type: "string" },
       "take-over": { type: "string" },
       out: { type: "string" },
@@ -741,7 +744,7 @@ async function main() {
       "account-id": z.string().optional(),
       "runner-cidr": z.string().optional(),
       root: z.string().default("cloudsql"),
-      source: z.string().optional(),
+      release: z.string().optional(),
       "instance-dir": z.string().optional(),
       "take-over": z.string().optional(),
       out: z.string().optional(),
@@ -766,16 +769,16 @@ async function main() {
     rootNamed(options.root, ROOT_NAMES)
   )
   assertBackend(files)
-  // The source is checked before anything is read from the network or written.
-  // init needs it only to point the bucket at the installation's own
+  // The release is checked before anything is read from the network or
+  // written. init needs it only to point the bucket at the installation's own
   // backend, under the operation record.
-  const source: Source | undefined =
-    SOURCE_COMMANDS.has(command) ||
+  const release: Release | undefined =
+    RELEASE_COMMANDS.has(command) ||
     changingPhase(command, forwardedArgs(args)) !== undefined ||
     (command === "init" && existsSync(ownBackendFile(files))) ||
-    (OPTIONAL_SOURCE_COMMANDS.has(command) &&
-      sourceOption(options.source) !== undefined)
-      ? requireSource(options.source)
+    (OPTIONAL_RELEASE_COMMANDS.has(command) &&
+      releaseOption(options.release) !== undefined)
+      ? requireRelease(options.release)
       : undefined
   const commandLine = (name: string) =>
     `${DRIVER} ${name} --root ${files.name} --instance-dir ${files.instance}`
@@ -784,7 +787,7 @@ async function main() {
       !options.credentials ||
       !options["web-host"] ||
       !options["database-provider"] ||
-      !source
+      !release
     )
       throw new SetupError(USAGE)
     if (existsSync(files.vars))
@@ -801,7 +804,8 @@ async function main() {
         databaseProvider: options["database-provider"],
         webHost: options["web-host"],
         credentials: readFileSync(options.credentials, "utf8"),
-        revision: source.revision,
+        revision: release.revision,
+        version: release.version,
         accountId: options["account-id"],
         runnerCidr: options["runner-cidr"],
         httpProxyConfigured: [
@@ -813,7 +817,7 @@ async function main() {
           "all_proxy",
         ].some((key) => Boolean(process.env[key]?.trim())),
       },
-      sourceSettings(source)
+      sourceSettings(release)
     )
     saveCloudflare(files, result, options.credentials)
     const lines = [
@@ -848,15 +852,21 @@ async function main() {
     process.stdout.write(`${lines.join("\n")}\n`)
     return
   }
-  if (command === "refresh" && source) {
+  if (command === "refresh" && release) {
     cloudflareVars(files)
     const vars = z
-      .looseObject({ deployment: z.looseObject({ revision: z.string() }) })
+      .looseObject({
+        deployment: z.looseObject({
+          revision: z.string(),
+          version: z.string().optional(),
+        }),
+      })
       .parse(JSON.parse(readFileSync(files.vars, "utf8")))
-    vars.deployment.revision = source.revision
+    vars.deployment.revision = release.revision
+    vars.deployment.version = release.version
     writePrivate(files.vars, `${JSON.stringify(vars, null, 2)}\n`)
     process.stdout.write(
-      `Updated deployment.revision to ${source.revision} (${source.path}); customer settings and credentials are unchanged.\n`
+      `Updated deployment to release ${release.version} (${release.revision}, ${release.path}); customer settings and credentials are unchanged.\n`
     )
     return
   }
@@ -899,8 +909,8 @@ async function main() {
               ["plan", "apply", "destroy"].includes(terraformArgs[0] ?? "")
                 ? neonCaPem()
                 : "",
-            ...(source
-              ? { TF_VAR_source_dir: source.path, AZAD_SOURCE: source.path }
+            ...(release
+              ? { TF_VAR_release_dir: release.path, AZAD_RELEASE: release.path }
               : {}),
             TF_DATA_DIR: where.data,
             ...(!bucket
@@ -928,8 +938,8 @@ async function main() {
     own: terraform,
   }
   const app =
-    source &&
-    installStore(source, {
+    release &&
+    installStore(release, {
       store,
       kind: "cloudflare",
       env_file: config.deployment.env_file,
@@ -1002,7 +1012,8 @@ async function main() {
     return
   }
   if (command === "deploy") {
-    if (!app || !source) throw new SetupError(USAGE)
+    if (!app || !release) throw new SetupError(USAGE)
+    assertDeploys(release, config.deployment.revision, commandLine("refresh"))
     process.exitCode = withOperation(
       app,
       "deploy",
@@ -1015,11 +1026,11 @@ async function main() {
           [
             process.execPath,
             "--no-env-file",
-            join(source.path, "scripts/self-host/cloudflare-install.ts"),
+            installer(release, "cloudflare-install"),
             "install",
           ],
           {
-            cwd: source.path,
+            cwd: release.payload,
             env: {
               ...process.env,
               AZAD_TERRAFORM_INSTALL: JSON.stringify(input),
@@ -1084,7 +1095,24 @@ function terraformOutputs(terraform: TerraformRun) {
   return { deploy, database_url: databaseUrl ?? undefined }
 }
 
-/** A lease the app's install-store.ts printed. */
+/**
+ * Refuses a deploy from another release than the one the variables record:
+ * `refresh` moves the installation to a release, and `deploy` installs it.
+ *
+ * @throws SetupError naming both revisions and the refresh command.
+ */
+export function assertDeploys(
+  release: Release,
+  revision: string,
+  refresh: string
+): void {
+  if (release.revision !== revision)
+    throw new SetupError(
+      `${release.path} is release ${release.version} (${release.revision}), but this installation's deployment.revision is ${revision}. To deploy this release, run first:\n  ${refresh} --release ${release.path}`
+    )
+}
+
+/** A lease the release's install-store.js printed. */
 const leaseSchema = z.object({ id: z.string(), version: z.string() })
 
 if (import.meta.main) {
@@ -1092,7 +1120,7 @@ if (import.meta.main) {
     await main()
   } catch (error) {
     process.stderr.write(
-      `${error instanceof SetupError || error instanceof InstanceError || error instanceof SourceError ? error.message : "Cloudflare setup failed. Check input files, credential formats and external metadata; no credential values are logged."}\n`
+      `${error instanceof SetupError || error instanceof InstanceError || error instanceof ReleaseError ? error.message : "Cloudflare setup failed. Check input files, credential formats and external metadata; no credential values are logged."}\n`
     )
     process.exitCode = 1
   }

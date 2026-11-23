@@ -9,7 +9,8 @@ cloudflare = {
   web_origin = "https://board.example.com"
 }
 deployment = {
-  revision        = "0000000000000000000000000000000000000000" # the source checkout's HEAD
+  revision        = "0000000000000000000000000000000000000000" # the release's sourceSha
+  version         = "4.497.0"                                  # the release's version
   env_file        = "/home/you/.azad/instances/default/.env"
   state_directory = "/home/you/.azad/instances/default/terraform/postgres/installer-state"
 }

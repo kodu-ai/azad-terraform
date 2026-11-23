@@ -1,102 +1,131 @@
 /**
- * The Azad app source checkout (`kodu-ai/azad-ide-web`) a driver deploys from.
+ * The unpacked Azad release a driver deploys from: a directory with
  *
- * This repository holds no app knowledge. Everything specific to the app
- * (validating and deriving its settings, installing, uninstalling, migrating,
- * verifying) runs as a subprocess of a stable entrypoint in that checkout:
+ *   release.json      {"format": 1, "version", "sourceSha", "signed", "agentConnect"}
+ *   payload/          the release's updater payload, with the installer
+ *                     entrypoints in payload/installer/
+ *   web/              the portable web build
  *
- *   bun --no-env-file <source>/scripts/self-host/<entry>.ts …
+ * The `azad` CLI downloads a release and checks its signature; by hand you
+ * point `--release` at one you unpacked. This repository holds no app
+ * knowledge. Everything specific to the app (validating and deriving its
+ * settings, installing, uninstalling, migrating, verifying) runs as a
+ * subprocess of a stable entrypoint in that release, from its payload:
  *
- * The drivers call `settings.ts` during setup, `cloudflare-install.ts install`
- * and `celld-install.ts` in their `deploy` (with the handoff Terraform
- * outputs), and `install-store.ts` around every command that changes the
- * installation (see ./state.ts). Terraform's destroy-time provisioner runs
- * `cloudflare-install.ts uninstall` (modules/installation) from the path the
- * drivers pass as `source_dir`.
+ *   cd <release>/payload && bun --no-env-file installer/<entry>.js …
+ *
+ * The drivers call `settings.js` during setup, `cloudflare-install.js
+ * install` and `celld-install.js` in their `deploy` (with the handoff
+ * Terraform outputs), and `install-store.js` around every command that
+ * changes the installation (see ./state.ts). Terraform's destroy-time
+ * provisioner runs `cloudflare-install.js uninstall` (modules/installation)
+ * from the path the drivers pass as `release_dir`. The install entrypoints
+ * find the rest of the release from their own location.
  * Settings travel on stdin as JSON, never as arguments or files. The
  * settings entrypoint exits 0 with JSON on stdout, 65 when it refuses a
  * setting (its reason on stderr) and 64 for a usage error.
  */
-import { existsSync, realpathSync, statSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { z } from "zod"
 import { isolatedProcessEnv } from "./lib"
 
-/** The app entrypoints a source checkout must contain. */
-export const ENTRYPOINTS = [
-  "scripts/self-host/settings.ts",
-  "scripts/self-host/cloudflare-install.ts",
-  "scripts/self-host/celld-install.ts",
-  "scripts/self-host/install-store.ts",
+/** The installer entrypoints a release must contain, in `payload/installer/<name>.js`. */
+export const INSTALLERS = [
+  "settings",
+  "cloudflare-install",
+  "celld-install",
+  "install-store",
 ] as const
+export type Installer = (typeof INSTALLERS)[number]
 
 /** A refusal whose message names paths and settings, never their values. */
-export class SourceError extends Error {
-  name = "SourceError"
+export class ReleaseError extends Error {
+  name = "ReleaseError"
 }
 
-/** A validated app source checkout. */
-export type Source = {
-  /** Absolute path of the checkout's top level. */
+/** `release.json`, format 1. */
+const releaseSchema = z.object({
+  format: z.literal(1),
+  version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u),
+  sourceSha: z.string().regex(/^[a-f0-9]{40}$/u),
+  signed: z.boolean(),
+  agentConnect: z.object({ version: z.string().min(1) }).nullable(),
+})
+
+/** A validated, unpacked Azad release. */
+export type Release = {
+  /** Absolute path of the release directory. */
   path: string
-  /** Its HEAD commit, which deploys bind to (`deployment.revision`). */
+  /** `<path>/payload`: where every installer entrypoint runs. */
+  payload: string
+  /** The release version (`deployment.version`). */
+  version: string
+  /** The app commit it was built from, which deploys bind to (`deployment.revision`). */
   revision: string
 }
 
-const MISSING = `Name the Azad app source checkout (a Git clone of kodu-ai/azad-ide-web with its dependencies installed) with --source <path> or AZAD_SOURCE.`
+const MISSING = `Name the unpacked Azad release (the azad CLI downloads and verifies one) with --release <dir> or AZAD_RELEASE.`
 
-/** `--source`, else `AZAD_SOURCE`; undefined when neither is set. */
-export function sourceOption(
+/** `--release`, else `AZAD_RELEASE`; undefined when neither is set. */
+export function releaseOption(
   option: string | undefined,
   env: Record<string, string | undefined> = process.env
 ): string | undefined {
-  return option?.trim() || env.AZAD_SOURCE?.trim() || undefined
+  return option?.trim() || env.AZAD_RELEASE?.trim() || undefined
 }
 
-function git(path: string, args: string[]) {
-  const result = Bun.spawnSync(["git", "-C", path, ...args], {
-    env: isolatedProcessEnv(),
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  return result.exitCode === 0 ? result.stdout.toString().trim() : undefined
+/** The absolute path of one installer entrypoint of `release`. */
+export function installer(release: Release, name: Installer): string {
+  return join(release.payload, "installer", `${name}.js`)
 }
 
 /**
- * Validates the checkout `option` (or `AZAD_SOURCE`) names: the top level of
- * a Git checkout with a readable HEAD, the app's self-host entrypoints and
- * installed dependencies.
+ * Validates the release `option` (or `AZAD_RELEASE`) names: a directory
+ * whose `release.json` this version reads, with the four installer
+ * entrypoints in `payload/installer/`.
  *
- * @throws SourceError naming what is missing.
+ * @throws ReleaseError naming what is missing.
  */
-export function requireSource(
+export function requireRelease(
   option: string | undefined,
   env: Record<string, string | undefined> = process.env
-): Source {
-  const selected = sourceOption(option, env)
-  if (!selected) throw new SourceError(`--source is required. ${MISSING}`)
+): Release {
+  const selected = releaseOption(option, env)
+  if (!selected) throw new ReleaseError(`--release is required. ${MISSING}`)
   const path = resolve(selected)
   if (!existsSync(path) || !statSync(path).isDirectory())
-    throw new SourceError(`${path} does not exist. ${MISSING}`)
-  const top = git(path, ["rev-parse", "--show-toplevel"])
-  if (!top) throw new SourceError(`${path} is not a Git checkout. ${MISSING}`)
-  if (realpathSync(top) !== realpathSync(path))
-    throw new SourceError(
-      `${path} is inside the Git checkout ${top}; pass the checkout's top-level directory.`
+    throw new ReleaseError(`${path} does not exist. ${MISSING}`)
+  const manifest = join(path, "release.json")
+  if (!existsSync(manifest))
+    throw new ReleaseError(
+      `${path} is not an Azad release: it has no release.json. ${MISSING}`
     )
-  const revision = git(path, ["rev-parse", "HEAD"])
-  if (!revision || !/^[a-f0-9]{40}$/u.test(revision))
-    throw new SourceError(`${path} has no readable HEAD commit.`)
-  const missing = ENTRYPOINTS.filter((entry) => !existsSync(join(path, entry)))
+  let text: unknown
+  try {
+    text = JSON.parse(readFileSync(manifest, "utf8"))
+  } catch {
+    text = undefined
+  }
+  const parsed = releaseSchema.safeParse(text)
+  if (!parsed.success)
+    throw new ReleaseError(
+      `${manifest} is not a release manifest this version reads: it needs format 1, version, sourceSha, signed and agentConnect.`
+    )
+  const release: Release = {
+    path,
+    payload: join(path, "payload"),
+    version: parsed.data.version,
+    revision: parsed.data.sourceSha,
+  }
+  const missing = INSTALLERS.filter(
+    (name) => !existsSync(installer(release, name))
+  ).map((name) => `payload/installer/${name}.js`)
   if (missing.length)
-    throw new SourceError(
-      `${path} is not an Azad app source checkout this release supports: it lacks ${missing.join(", ")}. Use a kodu-ai/azad-ide-web revision with the scripts/self-host entrypoints.`
+    throw new ReleaseError(
+      `${path} is not an Azad release this version supports: it lacks ${missing.join(", ")}. Use a release with the installer entrypoints.`
     )
-  if (!existsSync(join(path, "node_modules")))
-    throw new SourceError(
-      `${path} has no installed dependencies. Run: bun install --frozen-lockfile --cwd ${path}`
-    )
-  return { path, revision }
+  return release
 }
 
 /** Non-secret object storage the app selected from the STORAGE_* settings. */
@@ -111,8 +140,8 @@ export type StorageSelection =
     }
 
 /**
- * What setup asks the app about its settings. Production runs the source's
- * `scripts/self-host/settings.ts`; tests pass plain functions.
+ * What setup asks the app about its settings. Production runs the release's
+ * `payload/installer/settings.js`; tests pass plain functions.
  */
 export type AppSettings = {
   /** Prefix of the Cloudflare resource names the installer derives from the API origin. */
@@ -155,25 +184,21 @@ const storageSchema = z.discriminatedUnion("kind", [
 const EXIT_REFUSED = 65
 
 /**
- * Runs `scripts/self-host/settings.ts` in `source`. Exit 0 returns stdout;
+ * Runs the release's `settings.js` in its payload. Exit 0 returns stdout;
  * exit 65 is a refused setting (SettingsRefused with the entrypoint's
  * message, which names the setting, never its value); anything else is a
- * broken checkout (SourceError).
+ * broken release (ReleaseError).
  */
 function settingsEntry(
-  source: string,
+  release: Release,
   args: string[],
   input?: Record<string, string>
 ): string {
+  const entry = installer(release, "settings")
   const result = Bun.spawnSync(
-    [
-      process.execPath,
-      "--no-env-file",
-      join(source, "scripts/self-host/settings.ts"),
-      ...args,
-    ],
+    [process.execPath, "--no-env-file", entry, ...args],
     {
-      cwd: source,
+      cwd: release.payload,
       env: isolatedProcessEnv(),
       stdin:
         input === undefined
@@ -187,8 +212,8 @@ function settingsEntry(
   if (result.exitCode === 0) return result.stdout.toString()
   if (result.exitCode === EXIT_REFUSED)
     throw new SettingsRefused(message || "The app refused these settings.")
-  throw new SourceError(
-    `${join(source, "scripts/self-host/settings.ts")} ${args[0]} failed (exit ${result.exitCode})${message ? `:\n${message}` : "."}`
+  throw new ReleaseError(
+    `${entry} ${args[0]} failed (exit ${result.exitCode})${message ? `:\n${message}` : "."}`
   )
 }
 
@@ -201,11 +226,11 @@ function json(text: string): unknown {
   }
 }
 
-/** {@link AppSettings} answered by the source checkout's own entrypoint. */
-export function sourceSettings(source: Source): AppSettings {
+/** {@link AppSettings} answered by the release's own entrypoint. */
+export function sourceSettings(release: Release): AppSettings {
   return {
     resourcePrefix(apiOrigin) {
-      const output = settingsEntry(source.path, [
+      const output = settingsEntry(release, [
         "resource-names",
         "--api-origin",
         apiOrigin,
@@ -214,23 +239,23 @@ export function sourceSettings(source: Source): AppSettings {
         .object({ prefix: z.string().regex(/^[a-z0-9-]+$/u) })
         .safeParse(json(output))
       if (!parsed.success)
-        throw new SourceError(
-          "The source's settings entrypoint returned unexpected resource names."
+        throw new ReleaseError(
+          "The release's settings entrypoint returned unexpected resource names."
         )
       return parsed.data.prefix
     },
     storage(settings) {
       const parsed = storageSchema.safeParse(
-        json(settingsEntry(source.path, ["storage"], settings))
+        json(settingsEntry(release, ["storage"], settings))
       )
       if (!parsed.success)
-        throw new SourceError(
-          "The source's settings entrypoint returned an unexpected storage selection."
+        throw new ReleaseError(
+          "The release's settings entrypoint returned an unexpected storage selection."
         )
       return parsed.data
     },
     validate(target, settings) {
-      settingsEntry(source.path, ["validate", target], settings)
+      settingsEntry(release, ["validate", target], settings)
     },
   }
 }

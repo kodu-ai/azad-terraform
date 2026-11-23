@@ -61,7 +61,7 @@ variable "deletion_protection" {
 }
 
 variable "deployment" {
-  description = "What `gcp.ts deploy` deploys with: the installer's private dotenv (Clerk keys; GitHub App and optional settings when configured), which stays out of Terraform state, and state_directory, the deploy's local cache of the instance keys. scripts/gcp.ts writes both as paths in the instance directory, beside the source revision it deploys (deployment.revision, read by the driver only). Null provisions infrastructure only."
+  description = "What `gcp.ts deploy` deploys with: the installer's private dotenv (Clerk keys; GitHub App and optional settings when configured), which stays out of Terraform state, and state_directory, the deploy's local cache of the instance keys. scripts/gcp.ts writes both as paths in the instance directory, beside the release it deploys (deployment.revision, its sourceSha, and deployment.version, read by the driver only). Null provisions infrastructure only."
   type = object({
     env_file        = string
     state_directory = optional(string, ".celld-install")
