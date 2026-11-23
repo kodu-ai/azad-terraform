@@ -152,3 +152,22 @@ variable "updater_image" {
     error_message = "Use ghcr.io/kodu-ai/azad-updater@sha256:<digest>, or null."
   }
 }
+
+variable "miniapp_base_domain" {
+  description = "The Mini Apps domain of the loader provider: AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN from the instance's .env while AZAD_SELF_HOST_MINIAPPS=loader, which the driver passes as TF_VAR_miniapp_base_domain on every run; empty otherwise. A zone of the account, or a subdomain inside one, apart from the API and web hosts. Terraform adds a proxied wildcard record *.<domain> and, below the zone's apex, an advanced certificate pack. Edit the .env, not this variable."
+  type        = string
+  default     = ""
+  nullable    = false
+  validation {
+    condition     = var.miniapp_base_domain == "" || can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$", var.miniapp_base_domain))
+    error_message = "AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN must be a lowercase domain name such as apps.example.com."
+  }
+  validation {
+    condition = var.miniapp_base_domain == "" || alltrue([for origin in [var.cloudflare.api_origin, var.cloudflare.web_origin] : (
+      trimprefix(origin, "https://") != var.miniapp_base_domain &&
+      !endswith(trimprefix(origin, "https://"), ".${var.miniapp_base_domain}") &&
+      !endswith(var.miniapp_base_domain, ".${trimprefix(origin, "https://")}")
+    )])
+    error_message = "AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN must be apart from the API and web hosts: not one of them, above one or below one."
+  }
+}

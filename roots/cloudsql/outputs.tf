@@ -36,3 +36,8 @@ output "deploy" {
   description = "The handoff `cloudflare.ts deploy` gives the app's installer, without its revision and database URL; null without a deployment."
   value       = module.base.deploy
 }
+
+output "miniapps" {
+  description = "The loader provider's Mini Apps domain, its zone, wildcard record and certificate pack; null without one. `cloudflare.ts deploy` refuses a .env that names another domain."
+  value       = module.base.miniapps
+}

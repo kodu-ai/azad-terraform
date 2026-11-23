@@ -144,3 +144,10 @@ variable "updater_image" {
   type        = string
   default     = null
 }
+
+variable "miniapp_base_domain" {
+  description = "The loader provider's Mini Apps domain (see the root's miniapp_base_domain); empty creates nothing."
+  type        = string
+  default     = ""
+  nullable    = false
+}

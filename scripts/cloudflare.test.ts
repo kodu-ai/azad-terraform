@@ -17,6 +17,7 @@ import { fakeRelease } from "./fixtures/source"
 import {
   instanceTerraform,
   REPOSITORY,
+  upsertSettings,
   type InstanceTerraform,
 } from "./instance"
 import { ownBackendFile } from "./own-backend"
@@ -48,6 +49,7 @@ const input = {
   webHost: "board.example.com",
   revision: "a".repeat(40),
   version: "4.496.0",
+  miniappsDomain: "none",
   credentials,
 }
 const directories: string[] = []
@@ -167,7 +169,17 @@ function driver(args: string[], env: Record<string, string | undefined>) {
   )
 }
 
-function boundary(accountIds = ["0".repeat(32)], ip = "198.51.100.10") {
+/**
+ * The account holds example.com (the Board's zone) and example-apps.com.
+ * `certificates` is the advanced certificate allocation of a zone (or the
+ * status its quota answers with); `records` names the DNS records that
+ * already exist.
+ */
+function boundary(
+  accountIds = ["0".repeat(32)],
+  ip = "198.51.100.10",
+  lookups: { certificates?: number | "forbidden"; records?: string[] } = {}
+) {
   const calls: string[] = []
   const fetcher = async (
     url: string | URL | Request,
@@ -212,7 +224,25 @@ function boundary(accountIds = ["0".repeat(32)], ip = "198.51.100.10") {
         result:
           name === "example.com"
             ? [{ id: "2".repeat(32), name: "example.com" }]
-            : [],
+            : name === "example-apps.com"
+              ? [{ id: "3".repeat(32), name: "example-apps.com" }]
+              : [],
+      })
+    }
+    if (address.endsWith("/ssl/certificate_packs/quota")) {
+      const allocated = lookups.certificates ?? 1
+      return allocated === "forbidden"
+        ? Response.json({ success: false }, { status: 403 })
+        : Response.json({
+            success: true,
+            result: { advanced: { allocated, used: 0 } },
+          })
+    }
+    if (address.includes("/dns_records?")) {
+      const name = new URL(address).searchParams.get("name") ?? ""
+      return Response.json({
+        success: true,
+        result: (lookups.records ?? []).includes(name) ? [{ type: "A" }] : [],
       })
     }
     if (address.endsWith("/ips-v4"))
@@ -316,6 +346,126 @@ test("keeps an existing webhook and derives Mini App account only when its token
   expect(env.GITHUB_WEBHOOK_SECRET).toBe("keep-this")
   expect(env.V3_CF_ACCOUNT_ID).toBe("1".repeat(32))
   expect(result.tfvars.gcp?.authorized_networks.runner).toBe("203.0.113.42/32")
+})
+
+test("a zone of its own puts Mini Apps on the loader provider, with Universal SSL", async () => {
+  const api = boundary()
+  const result = await prepareCloudflare(
+    { ...input, miniappsDomain: "Example-Apps.com." },
+    app,
+    api.fetcher
+  )
+  expect(result.miniapps).toEqual({
+    domain: "example-apps.com",
+    zone: { id: "3".repeat(32), name: "example-apps.com" },
+    certificate: false,
+  })
+  const env = parse(result.installerEnv)
+  expect(env.AZAD_SELF_HOST_MINIAPPS).toBe("loader")
+  expect(env.AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN).toBe("example-apps.com")
+  // Nothing about Mini Apps goes into the variables: the .env is the one place.
+  expect(JSON.stringify(result.tfvars)).not.toContain("example-apps.com")
+  expect(api.calls.some((call) => call.includes("/quota"))).toBe(false)
+  expect(api.calls).toContain(
+    `https://api.cloudflare.com/client/v4/zones/${"3".repeat(32)}/dns_records?name=*.example-apps.com`
+  )
+})
+
+test("a subdomain of a zone, even the Board's, needs Advanced Certificate Manager on it", async () => {
+  const result = await prepareCloudflare(
+    { ...input, miniappsDomain: "apps.example.com" },
+    app,
+    boundary().fetcher
+  )
+  expect(result.miniapps).toEqual({
+    domain: "apps.example.com",
+    zone: { id: "2".repeat(32), name: "example.com" },
+    certificate: true,
+  })
+  await expect(
+    prepareCloudflare(
+      { ...input, miniappsDomain: "apps.example.com" },
+      app,
+      boundary(undefined, undefined, { certificates: 0 }).fetcher
+    )
+  ).rejects.toThrow("needs Advanced Certificate Manager on example.com")
+  await expect(
+    prepareCloudflare(
+      { ...input, miniappsDomain: "apps.example.com" },
+      app,
+      boundary(undefined, undefined, { certificates: "forbidden" }).fetcher
+    )
+  ).rejects.toThrow("give the token SSL and Certificates Edit on example.com")
+})
+
+test("a Mini Apps domain outside the account, on a Board host or with a wildcard record already is refused", async () => {
+  await expect(
+    prepareCloudflare(
+      { ...input, miniappsDomain: "apps.example.net" },
+      app,
+      boundary().fetcher
+    )
+  ).rejects.toThrow(
+    "apps.example.net is not in a Cloudflare zone of this account"
+  )
+  await expect(
+    prepareCloudflare(
+      { ...input, miniappsDomain: "example-apps.com" },
+      app,
+      boundary(undefined, undefined, { records: ["*.example-apps.com"] })
+        .fetcher
+    )
+  ).rejects.toThrow("DNS already has a record for *.example-apps.com")
+  for (const domain of [
+    "board.example.com",
+    "example.com",
+    "x.api.board.example.com",
+    "https://apps.example.com",
+  ]) {
+    const api = boundary()
+    await expect(
+      prepareCloudflare({ ...input, miniappsDomain: domain }, app, api.fetcher)
+    ).rejects.toThrow("--miniapps-domain")
+    expect(api.calls).toEqual([])
+  }
+})
+
+test("the loader keeps Mini Apps in R2, so it refuses an own bucket before any lookup", async () => {
+  const api = boundary()
+  await expect(
+    prepareCloudflare(
+      {
+        ...input,
+        miniappsDomain: "example-apps.com",
+        credentials: `${credentials}\nSTORAGE_ADAPTER=gcs\nSTORAGE_BUCKET=customer-azad-files\n`,
+      },
+      app,
+      api.fetcher
+    )
+  ).rejects.toThrow("--miniapps-domain needs STORAGE_ADAPTER=r2")
+  expect(api.calls).toEqual([])
+})
+
+test("--miniapps-domain none turns Mini Apps off, or keeps them as Workers with their own token", async () => {
+  const off = await prepareCloudflare(
+    {
+      ...input,
+      credentials: `${credentials}\nAZAD_SELF_HOST_MINIAPP_BASE_DOMAIN=old.example-apps.com\n`,
+    },
+    app,
+    boundary().fetcher
+  )
+  expect(off.miniapps).toBeUndefined()
+  expect(parse(off.installerEnv)).toMatchObject({
+    AZAD_SELF_HOST_MINIAPPS: "disabled",
+    AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN: "",
+  })
+  const workers = await prepareCloudflare(
+    { ...input, credentials: `${credentials}\nV3_CF_API_TOKEN=fake-runtime\n` },
+    app,
+    boundary().fetcher
+  )
+  expect(parse(workers.installerEnv).AZAD_SELF_HOST_MINIAPPS).toBe("enabled")
 })
 
 test("asks for account selection when a token can access multiple accounts", async () => {
@@ -637,6 +787,41 @@ test("forwards a saved-plan command with the selected token, the instance's vari
   })
 })
 
+test("every Terraform run gets the Mini Apps domain from the .env, and only while the loader is selected", async () => {
+  const f = layout("terraform-cloudflare-loader-")
+  const result = await prepareCloudflare(input, app, boundary().fetcher)
+  saveCloudflare(f.files, result, f.credentialsFile)
+  initialized(f.files)
+  const bin = echoTerraform(
+    f.directory,
+    "process.stdout.write(JSON.stringify({ domain: process.env.TF_VAR_miniapp_base_domain ?? null }))"
+  )
+  const plan = (env: Record<string, string> = {}) =>
+    JSON.parse(
+      driver(
+        [
+          "plan",
+          "--root",
+          f.root,
+          "--release",
+          f.release.path,
+          "--instance-dir",
+          f.files.instance,
+        ],
+        { PATH: `${bin}:${process.env.PATH}`, ...env }
+      ).stdout.toString()
+    ).domain
+  // An exported value never wins over the .env.
+  expect(plan({ TF_VAR_miniapp_base_domain: "ambient.example.org" })).toBe("")
+  upsertSettings(f.files.settings, {
+    AZAD_SELF_HOST_MINIAPPS: "loader",
+    AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN: "Example-Apps.com",
+  })
+  expect(plan()).toBe("example-apps.com")
+  upsertSettings(f.files.settings, { AZAD_SELF_HOST_MINIAPPS: "disabled" })
+  expect(plan()).toBe("")
+})
+
 test("commands that deploy or uninstall need a valid release; state readers do not", async () => {
   const f = layout("terraform-cloudflare-source-")
   const result = await prepareCloudflare(input, app, boundary().fetcher)
@@ -794,6 +979,8 @@ test("CLI detects proxy environment before network lookup or output writes", () 
       input.projectId,
       "--web-host",
       input.webHost,
+      "--miniapps-domain",
+      "none",
       "--credentials",
       f.credentialsFile,
       "--root",
@@ -811,6 +998,33 @@ test("CLI detects proxy environment before network lookup or output writes", () 
   expect(existsSync(f.files.instance)).toBe(false)
 })
 
+test("CLI setup needs --miniapps-domain before any lookup", () => {
+  const f = layout("terraform-cloudflare-miniapps-")
+  const child = driver(
+    [
+      "setup",
+      "--database-provider",
+      "postgres",
+      "--web-host",
+      input.webHost,
+      "--credentials",
+      f.credentialsFile,
+      "--root",
+      "postgres",
+      "--release",
+      f.release.path,
+      "--instance-dir",
+      f.files.instance,
+    ],
+    { PATH: process.env.PATH }
+  )
+  expect(child.exitCode).toBe(1)
+  expect(child.stderr.toString()).toContain(
+    "setup needs --miniapps-domain: the domain Mini Apps serve under"
+  )
+  expect(existsSync(f.files.instance)).toBe(false)
+})
+
 test("CLI setup refuses a root that does not match the database provider", () => {
   const f = layout("terraform-cloudflare-provider-", "cloudsql")
   const child = driver(
@@ -820,6 +1034,8 @@ test("CLI setup refuses a root that does not match the database provider", () =>
       "postgres",
       "--web-host",
       input.webHost,
+      "--miniapps-domain",
+      "none",
       "--credentials",
       f.credentialsFile,
       "--release",
@@ -1245,4 +1461,46 @@ test("deploy runs the release's installer from its payload with this machine's f
   )
   expect(refused.stderr.toString()).toContain("refresh --root postgres")
   expect(stateCalls(other)).toEqual([])
+
+  // The app routes the .env's Mini Apps domain: Terraform must have applied it.
+  upsertSettings(f.files.settings, {
+    AZAD_SELF_HOST_MINIAPPS: "loader",
+    AZAD_SELF_HOST_MINIAPP_BASE_DOMAIN: "example-apps.com",
+  })
+  const before = stateCalls(f.release).length
+  const unapplied = driver(
+    [
+      "deploy",
+      "--root",
+      f.root,
+      "--release",
+      f.release.path,
+      "--instance-dir",
+      f.files.instance,
+    ],
+    { PATH: `${bin}:${process.env.PATH}` }
+  )
+  expect(unapplied.exitCode).toBe(1)
+  expect(unapplied.stderr.toString()).toContain(
+    "(example-apps.com) differs from the one Terraform last applied (none). Run plan and apply first"
+  )
+  expect(stateCalls(f.release)).toHaveLength(before)
+  const applied = echoTerraform(
+    join(f.directory, "applied"),
+    `process.stdout.write(${JSON.stringify(JSON.stringify({ ...output, miniapps: { value: { domain: "example-apps.com" } } }))})`
+  )
+  const loader = driver(
+    [
+      "deploy",
+      "--root",
+      f.root,
+      "--release",
+      f.release.path,
+      "--instance-dir",
+      f.files.instance,
+    ],
+    { PATH: `${applied}:${process.env.PATH}` }
+  )
+  expect(loader.stderr.toString()).toBe("")
+  expect(loader.exitCode).toBe(0)
 })

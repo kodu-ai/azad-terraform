@@ -39,7 +39,7 @@ module "installation" {
   storage         = var.storage
 
   github_app_pending = var.github_app_pending
-  depends_on         = [module.database, module.cloudflare, module.clerk_dns, module.host_routes]
+  depends_on         = [module.database, module.cloudflare, module.clerk_dns, module.host_routes, module.miniapp_domain]
 }
 
 module "clerk_dns" {
@@ -55,4 +55,13 @@ module "host_routes" {
   count  = length(var.host_zones) == 0 ? 0 : 1
 
   hosts = var.host_zones
+}
+
+module "miniapp_domain" {
+  source = "../cloudflare/miniapp-domain"
+  count  = var.miniapp_base_domain == "" ? 0 : 1
+
+  domain       = var.miniapp_base_domain
+  account_id   = var.cloudflare.account_id
+  installation = module.cloudflare.resource_prefix
 }

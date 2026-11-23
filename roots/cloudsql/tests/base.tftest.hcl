@@ -128,3 +128,18 @@ run "minimal_generated_configuration" {
     error_message = "Omitting the SQL name must derive it from the API origin."
   }
 }
+
+run "the_loader_domain_gets_a_wildcard_in_its_own_zone" {
+  command = plan
+  variables {
+    miniapp_base_domain = "example-apps.com"
+  }
+  override_module {
+    target  = module.base.module.miniapp_domain[0].module.zone
+    outputs = { zone = { id = "22222222222222222222222222222222", name = "example-apps.com" } }
+  }
+  assert {
+    condition     = output.miniapps.zone_id == "22222222222222222222222222222222" && output.miniapps.certificate_pack == null
+    error_message = "A zone apex needs no certificate pack: Universal SSL covers its first-level subdomains."
+  }
+}

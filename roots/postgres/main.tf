@@ -11,4 +11,6 @@ module "base" {
   host_zones         = var.host_zones
   clerk_dns          = var.clerk_dns
   updater_image      = var.updater_image
+
+  miniapp_base_domain = var.miniapp_base_domain
 }
